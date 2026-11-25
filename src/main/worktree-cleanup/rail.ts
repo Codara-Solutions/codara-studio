@@ -623,13 +623,19 @@ async function cleanUpRegistered(
   // Processes left running inside are judged apart (leftovers.ts) when they
   // can be stopped; the removal itself never accepts one.
   const stopper = !missing && request.mode !== "auto" ? deps.leftovers : undefined;
+  // Once anything was stopped, what runs in it must be read in full before
+  // it goes: an unreadable scan is never "nothing left".
+  let stopped = false;
   const judge = async (allow: ReadonlySet<WorktreeInUseKind> | undefined) => {
     const [check] = await checkCleanupTargets(deps, [{ repoRoot: repo.root, path }], {
       allowInUse: allow,
-      requireKnownUsage,
+      requireKnownUsage: requireKnownUsage || stopped,
       makerElsewhereOk,
     });
     if (!check) return refused("The worktree could not be checked.", workspace.name, "CHECK_FAILED");
+    if (stopped && check.blockers.some((entry) => entry.code === "UNCHECKED" && entry.message.startsWith("What is running in it"))) {
+      return refused("Its programs were stopped, but what runs in it could not be read in full, so it was kept. Try Clean up again.", workspace.name, "UNCHECKED");
+    }
     // Neither automatic mode goes ahead on a branch git could not read: the
     // one the check judged (the worktree may have switched) and the row's.
     if (request.mode !== "manual") {
@@ -686,7 +692,13 @@ async function cleanUpRegistered(
     }
   }
   if (check.leftoverPids?.length) {
-    const failed = leftovers.length ? await stopLeftovers(stopper!, real, leftovers) : [];
+    if (leftovers.length && request.mode === "auto-merged") {
+      // Asked before anything is stopped, as again before the removal.
+      const late = await lastMomentRefusal(deps, workspace, path);
+      if (late) return refused(late, workspace.name, "IN_USE");
+    }
+    stopped = leftovers.length > 0;
+    const failed = stopped ? await stopLeftovers(stopper!, real, leftovers) : [];
     if (failed.length) {
       const why = failed.map(({ entry, why: reason }) => `${entry.program} (pid ${entry.pid}): ${reason}.`).join(" ");
       return refused(`${why} The worktree was kept.`, workspace.name, "STOP_FAILED");
@@ -709,7 +721,11 @@ async function cleanUpRegistered(
       };
     }
   }
-  return removeChecked(deps, repo, workspace, path, request, options, check, { allowInUse, requireKnownUsage, makerElsewhereOk });
+  return removeChecked(deps, repo, workspace, path, request, options, check, {
+    allowInUse,
+    requireKnownUsage: requireKnownUsage || stopped,
+    makerElsewhereOk,
+  });
 }
 
 async function removeChecked(
@@ -742,7 +758,8 @@ async function removeChecked(
       ...(allowInUse ? { allowInUse } : {}),
       ...(makerElsewhereOk ? { makerElsewhereOk } : {}),
       ...(canArchive ? { archiveIgnored: true } : {}),
-      ...(requireKnownUsage ? { requireKnownUsage, beforeRemove: () => lastMomentRefusal(deps, workspace, path) } : {}),
+      ...(requireKnownUsage ? { requireKnownUsage } : {}),
+      ...(request.mode === "auto-merged" ? { beforeRemove: () => lastMomentRefusal(deps, workspace, path) } : {}),
     },
   );
   const outcome = outcomes[0];

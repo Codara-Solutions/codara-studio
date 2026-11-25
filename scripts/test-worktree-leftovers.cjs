@@ -1,9 +1,9 @@
 // Processes left running in a merged worktree (src/main/worktree-cleanup/
 // leftovers.ts, and rail.ts's Clean up around it). The invariant: a signal
-// reaches a process only when, right before it, the process has the pid and
-// start time the user confirmed and still works inside the worktree; a group
-// only when every member is confirmed and inside; and the worktree goes only
-// after a fresh check finds nothing running in it. Driven against throwaway
+// reaches a process only when, right before it, the process has the pid,
+// start time and command line the user confirmed and still works inside the
+// worktree; never a whole group; a read that fails is never an exit; and the
+// worktree goes only after a fresh, complete check finds nothing running. Driven against throwaway
 // git repositories with a bare remote and a fake process table, plus one real
 // child process stopped through the real system (Linux and macOS).
 const assert = require("node:assert/strict");
@@ -62,12 +62,15 @@ function fakeSystem() {
     appPid: 100,
     sessions: new Set(),
     sessionPids: () => [...system.sessions],
-    facts: async (pid) => (procs.has(pid) ? { ...procs.get(pid) } : null),
-    table: async () => [...procs.values()].map(({ pid, parentPid, group }) => ({ pid, parentPid, group })),
+    facts: async (pid) => {
+      if (system.unreadable.has(pid)) throw new Error("EACCES");
+      return procs.has(pid) ? { ...procs.get(pid) } : null;
+    },
+    unreadable: new Set(),
+    table: async () => [...procs.values()].map(({ pid, parentPid }) => ({ pid, parentPid })),
     signal: (pid, signal) => {
       signals.push([pid, signal]);
-      const targets = pid < 0 ? [...procs.values()].filter((entry) => entry.group === -pid) : [procs.get(pid)].filter(Boolean);
-      for (const entry of targets) {
+      for (const entry of [procs.get(pid)].filter(Boolean)) {
         if (entry.unkillable || (signal === "SIGTERM" && entry.ignoresTerm)) continue;
         procs.delete(entry.pid);
       }
@@ -82,17 +85,17 @@ function fakeSystem() {
     procs.set(pid, {
       pid,
       parentPid: 1,
-      group: pid,
       start: `s${pid}`,
       startedAtMs: clock - 3 * HOUR,
       cwd: "/nowhere",
       command: "node server.js --token=FAKE_SECRET",
       zombie: false,
+      cgroup: "0::/app.scope",
       ...extra,
     });
   // Codara runs under the user's service manager, where orphans land too.
-  procs.set(50, { pid: 50, parentPid: 1, group: 50, start: "sd", startedAtMs: 0, cwd: "/", command: "/usr/lib/systemd/systemd --user", zombie: false });
-  procs.set(100, { pid: 100, parentPid: 50, group: 100, start: "app", startedAtMs: 0, cwd: "/", command: "codara", zombie: false });
+  procs.set(50, { pid: 50, parentPid: 1, start: "sd", startedAtMs: 0, cwd: "/", command: "/usr/lib/systemd/systemd --user", zombie: false, cgroup: "0::/init.scope" });
+  procs.set(100, { pid: 100, parentPid: 50, start: "app", startedAtMs: 0, cwd: "/", command: "codara", zombie: false, cgroup: "0::/app.scope" });
   return { system, procs, signals, add };
 }
 
@@ -121,6 +124,9 @@ async function main() {
       assert.equal(leftovers.programOf("npm run dev -- --port 3000"), "npm run dev");
       assert.equal(leftovers.programOf("node -e setInterval(()=>{},1000)"), "node");
       assert.equal(leftovers.programOf("/opt/bin/vite --host"), "vite");
+      // Past an option, a word may be its value: only the program then.
+      assert.equal(leftovers.programOf("node --eval=run() FAKE_TOKEN"), "node");
+      assert.equal(leftovers.programOf("python3 -c FAKE_TOKEN"), "python3");
     });
 
     const W = "/work/tree";
@@ -133,6 +139,40 @@ async function main() {
       assert.deepEqual(signals, []);
       assert.deepEqual(failed, []);
       assert.equal(procs.has(501), true);
+    });
+
+    await check("the same pid and start with another command line is not signalled", async () => {
+      const { system, procs, signals, add } = fakeSystem();
+      add(509, { cwd: W });
+      const [entry] = await leftovers.describeLeftovers(system, W, [509], new Map());
+      procs.get(509).command = "node other.js";
+      await leftovers.stopLeftovers(system, W, [entry]);
+      assert.deepEqual(signals, []);
+    });
+
+    await check("a path that only looks inside (a backslash, another case) is not inside", async () => {
+      const { system, add } = fakeSystem();
+      add(530, { cwd: "/work/tree\\other" });
+      add(531, { cwd: "/work/Tree" });
+      const list = await leftovers.describeLeftovers(system, W, [530, 531], new Map());
+      assert.deepEqual(list.map((entry) => Boolean(entry.blocked)), [true, true]);
+    });
+
+    await check("a read that fails is never taken for an exit", async () => {
+      const { system, signals, add } = fakeSystem();
+      add(540, { cwd: W, ignoresTerm: true });
+      const list = await leftovers.describeLeftovers(system, W, [540], new Map());
+      const realSignal = system.signal;
+      system.signal = (pid, signal) => {
+        realSignal(pid, signal);
+        system.unreadable.add(pid);
+      };
+      const failed = await leftovers.stopLeftovers(system, W, list);
+      assert.deepEqual(failed.map(({ entry, why }) => [entry.pid, why]), [[540, "whether it stopped could not be read"]]);
+      assert.deepEqual(signals, [[540, "SIGTERM"]], "nothing more is sent to what cannot be read");
+      system.unreadable.add(541);
+      const [unread] = await leftovers.describeLeftovers(system, W, [541], new Map());
+      assert.equal(unread.blocked, "it could not be read");
     });
 
     await check("a process whose folder moved out of the worktree is not signalled", async () => {
@@ -150,25 +190,19 @@ async function main() {
       add(504, { cwd: W, unkillable: true });
       const list = await leftovers.describeLeftovers(system, W, [503, 504], new Map());
       const failed = await leftovers.stopLeftovers(system, W, list);
-      // Each leads a group of its own, so the group is signalled.
-      assert.deepEqual(signals, [[-503, "SIGTERM"], [-504, "SIGTERM"], [-503, "SIGKILL"], [-504, "SIGKILL"]]);
+      assert.deepEqual(signals, [[503, "SIGTERM"], [504, "SIGTERM"], [503, "SIGKILL"], [504, "SIGKILL"]]);
       assert.deepEqual(failed.map(({ entry, why }) => [entry.pid, why]), [[504, "it did not stop, even when forced"]]);
     });
 
-    await check("a group is signalled whole only when every member was confirmed", async () => {
-      const { system, signals, add } = fakeSystem();
-      add(510, { cwd: W, group: 510 });
-      add(511, { cwd: W, group: 510, parentPid: 510 });
-      let list = await leftovers.describeLeftovers(system, W, [510, 511], new Map());
+    await check("only the confirmed pids are signalled, never their group", async () => {
+      const { system, procs, signals, add } = fakeSystem();
+      add(510, { cwd: W });
+      const list = await leftovers.describeLeftovers(system, W, [510], new Map());
+      // A worker forked after the question, in the same group.
+      add(511, { cwd: "/elsewhere", parentPid: 510 });
       await leftovers.stopLeftovers(system, W, list);
-      assert.deepEqual(signals, [[-510, "SIGTERM"]]);
-      const other = fakeSystem();
-      other.add(520, { cwd: W, group: 520 });
-      other.add(521, { cwd: "/elsewhere", group: 520, parentPid: 520 });
-      list = await leftovers.describeLeftovers(other.system, W, [520], new Map());
-      await leftovers.stopLeftovers(other.system, W, list);
-      assert.deepEqual(other.signals, [[520, "SIGTERM"]]);
-      assert.equal(other.procs.has(521), true, "the member outside the worktree runs on");
+      assert.deepEqual(signals, [[510, "SIGTERM"]]);
+      assert.equal(procs.has(511), true);
     });
 
     await check("Codara, a pane's shell and what runs in a pane are never stopped; an agent's child is named", async () => {
@@ -195,6 +229,11 @@ async function main() {
       add(950, { cwd: W, parentPid: 50 });
       const [orphan] = await leftovers.describeLeftovers(system, W, [950], panes);
       assert.deepEqual([orphan.blocked, orphan.orphan], [undefined, true], "an orphan beside Codara is not Codara's");
+      // A service the user runs from the worktree on purpose has its own group.
+      add(951, { cwd: W, parentPid: 50, cgroup: "0::/user.slice/dev.service" });
+      add(952, { cwd: W, parentPid: 1, cgroup: null });
+      const others = await leftovers.describeLeftovers(system, W, [951, 952], panes);
+      assert.deepEqual(others.map((entry) => entry.orphan), [false, false]);
     });
 
     // ── Clean up from the rail ──────────────────────────────────────────
@@ -295,7 +334,7 @@ async function main() {
     });
 
     await check("a list that changed since the question asks again and stops nothing", async () => {
-      fake.add(4244, { cwd: served, command: "node worker.js", parentPid: 4242, group: 4242 });
+      fake.add(4244, { cwd: served, command: "node worker.js", parentPid: 4242 });
       const again = await click("served", { confirmStop: asked.stopFingerprint });
       assert.equal(again.status, "confirm");
       assert.equal(again.message, "It changed since you were asked.");
@@ -307,7 +346,7 @@ async function main() {
     await check("the yes stops exactly those processes, then the worktree and its branch go", async () => {
       const done = await click("served", { confirmStop: asked.stopFingerprint });
       assert.equal(done.status, "removed", done.message);
-      assert.deepEqual(fake.signals, [[-4242, "SIGTERM"]]);
+      assert.deepEqual(fake.signals, [[4242, "SIGTERM"], [4244, "SIGTERM"]]);
       assert.equal(fake.procs.has(4343), true, "a process outside runs on");
       assert.equal(fs.existsSync(served), false);
       assert.equal(has("served"), false);
@@ -323,6 +362,25 @@ async function main() {
       assert.equal(result.message, "python3 app.py (pid 5050): it did not stop, even when forced. The worktree was kept.");
       assert.equal(fs.existsSync(stuck), true);
       fake.procs.delete(5050);
+    });
+
+    await check("after a stop, an unreadable scan keeps the worktree", async () => {
+      const blind = merged("blind");
+      fake.add(6161, { cwd: blind });
+      const ask = await click("blind");
+      const original = deps.processesUnderCwds;
+      deps.processesUnderCwds = async (dirs) => {
+        const found = await original(dirs);
+        return fake.signals.some(([pid]) => pid === 6161) ? Object.assign(found, { openFilesUnknown: true }) : found;
+      };
+      try {
+        const result = await click("blind", { confirmStop: ask.stopFingerprint });
+        assert.equal(result.status, "refused");
+        assert.match(result.message, /could not be read in full, so it was kept/);
+        assert.equal(fs.existsSync(blind), true);
+      } finally {
+        deps.processesUnderCwds = original;
+      }
     });
 
     await check("an ignored file and a leftover are asked about together, and both answers are needed", async () => {
@@ -367,6 +425,13 @@ async function main() {
       assert.equal(stays.status, "refused");
       assert.equal(fs.existsSync(led), true);
       assert.equal(fake.procs.has(9001), true);
+      const held = merged("held");
+      fake.add(9003, { cwd: held, parentPid: 1 });
+      deps.workspaceHeld = async (id) => id === "held";
+      const kept = await auto("held");
+      deps.workspaceHeld = async () => false;
+      assert.equal(kept.status, "refused");
+      assert.equal(fake.procs.has(9003), true, "the window is asked before anything is stopped");
       const orphaned = merged("orphaned");
       fake.add(9002, { cwd: orphaned, parentPid: 1 });
       const gone = await auto("orphaned");

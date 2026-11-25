@@ -8,28 +8,25 @@ import { psTimeEnvironment, readProcFile } from "../owned-process-tree";
 
 // Processes left running in a merged worktree (a dev server an agent started
 // and never stopped), which the rail's Clean up names and, on a yes, stops.
-// Nothing is signalled unless, right before the signal, it is the same
-// process (same pid and start time) and still works inside the worktree. A
-// process group is signalled only when every member of it was confirmed,
-// its leader included; otherwise each process alone. Codara's own processes,
-// the shells of terminal panes and what the user runs in a pane are never
-// stopped: they are named, and the worktree stays.
+// Only the confirmed processes are signalled, each by its own pid, never a
+// group (a member forked after the question was never confirmed), and only
+// when right before the signal it is the same process (pid, start time and
+// command line, read on both sides of its folder) and still works inside the
+// worktree. A read that fails is never taken for an exit. Codara's own
+// processes, the shells of terminal panes and what the user runs in a pane
+// are never stopped: they are named, and the worktree stays.
 
-// As inspect.ts judges it, without loading it: index.ts builds the system eagerly.
+// Real POSIX paths as the system gives them, compared exactly: a backslash
+// is part of a name here, and a case-sensitive volume has "a" and "A".
 function isAtOrUnder(candidate: string, dir: string): boolean {
-  const key = (path: string) => {
-    const slashed = path.replace(/\\/g, "/").replace(/\/+$/, "") || "/";
-    return process.platform === "darwin" ? slashed.toLowerCase() : slashed;
-  };
-  const a = key(candidate);
-  const b = key(dir);
-  return a === b || a.startsWith(b.endsWith("/") ? b : `${b}/`);
+  const a = candidate.replace(/\/+$/, "") || "/";
+  const b = dir.replace(/\/+$/, "") || "/";
+  return a === b || a.startsWith(b === "/" ? "/" : `${b}/`);
 }
 
 export interface ProcessFacts {
   pid: number;
   parentPid: number;
-  group: number;
   /** When it started, as the system spells it: a reused pid has another. */
   start: string;
   startedAtMs: number | null;
@@ -38,17 +35,18 @@ export interface ProcessFacts {
   command: string;
   /** Exited, waiting for its parent to collect it. */
   zombie: boolean;
+  /** Linux: its control group, which an orphan keeps from where it was started. Null elsewhere. */
+  cgroup: string | null;
 }
 
 export interface LeftoverSystem {
   appPid: number;
   /** The shells (or agents) of the terminal panes. */
   sessionPids(): readonly number[];
-  /** Null when it is gone. */
+  /** Null when it is gone; throws when it cannot be read. */
   facts(pid: number): Promise<ProcessFacts | null>;
-  /** Every process's pid, parent and group; null when they cannot be listed. */
-  table(): Promise<ReadonlyArray<{ pid: number; parentPid: number; group: number }> | null>;
-  /** A negative pid signals that process group. */
+  /** Every process's pid and parent; null when they cannot be listed. */
+  table(): Promise<ReadonlyArray<{ pid: number; parentPid: number }> | null>;
   signal(pid: number, signal: "SIGTERM" | "SIGKILL"): void;
   wait(ms: number): Promise<void>;
   now(): number;
@@ -58,7 +56,13 @@ export interface LeftoverSystem {
 
 export interface Leftover extends WorktreeLeftoverProcess {
   start: string;
-  /** Its parent is init or the user's service manager, and no tab leads to it. */
+  /** Its command line, hashed: with the start, what makes it the same process. */
+  commandKey: string;
+  /**
+   * It lost its parent below Codara: now a child of init or the user's
+   * service manager, still in Codara's control group, and no tab leads to it.
+   * A service started on purpose has a group of its own. Never on macOS.
+   */
   orphan: boolean;
   /** Why it is not stopped; the worktree then stays. */
   blocked?: string;
@@ -78,16 +82,22 @@ function nameOf(word: string | undefined): string {
 export function programOf(command: string): string {
   const words = command.trim().split(/\s+/).filter(Boolean);
   const name = nameOf(words[0]) || "a program";
-  const args = words.slice(1).filter((word) => !word.startsWith("-"));
-  if (PACKAGE_RUNNERS.has(name) && args[0] && WORD.test(args[0])) {
-    if ((args[0] === "run" || args[0] === "exec") && args[1] && WORD.test(args[1])) return `${name} ${args[0]} ${args[1]}`;
-    return `${name} ${args[0]}`;
+  // Only a script right after the program: past any option, a word may be
+  // that option's value (--eval CODE, -p TOKEN).
+  const [first, second] = words.slice(1);
+  if (PACKAGE_RUNNERS.has(name) && first && WORD.test(first) && !first.startsWith("-")) {
+    if ((first === "run" || first === "exec") && second && WORD.test(second) && !second.startsWith("-")) return `${name} ${first} ${second}`;
+    return `${name} ${first}`;
   }
-  if (RUNNERS.has(name) && args[0]) {
-    const script = basename(args[0]);
+  if (RUNNERS.has(name) && first && !first.startsWith("-")) {
+    const script = basename(first);
     if (WORD.test(script)) return `${name} ${script}`;
   }
   return name;
+}
+
+function keyOf(command: string): string {
+  return createHash("sha256").update(command).digest("hex").slice(0, 16);
 }
 
 function isAgentCommand(command: string): boolean {
@@ -116,9 +126,16 @@ export async function describeLeftovers(
   const app = new Set<number>();
   for (let pid: number | undefined = system.appPid; pid !== undefined && pid > 1 && !app.has(pid); pid = parentOf.get(pid)) app.add(pid);
   const tabOf = (pid: number) => panes.get(pid) ?? "a terminal tab";
+  const appGroup = (await system.facts(system.appPid).catch(() => null))?.cgroup ?? null;
   const out: Leftover[] = [];
   for (const pid of [...new Set(pids)]) {
-    const facts = await system.facts(pid).catch(() => null);
+    let facts: ProcessFacts | null;
+    try {
+      facts = await system.facts(pid);
+    } catch {
+      out.push({ pid, start: "", commandKey: "", program: "a program", orphan: false, blocked: "it could not be read" });
+      continue;
+    }
     if (!facts || facts.zombie) continue;
     const ancestors: number[] = [];
     for (let up: number | undefined = facts.parentPid; up !== undefined && up > 1 && !ancestors.includes(up); up = parentOf.get(up)) {
@@ -150,7 +167,7 @@ export async function describeLeftovers(
       blocked = facts.cwd === null ? "its folder cannot be read" : "it only has a file open in it. Close that file first";
     }
     let orphan = false;
-    if (session === undefined && appAt < 0) {
+    if (session === undefined && appAt < 0 && appGroup !== null && facts.cgroup === appGroup) {
       if (facts.parentPid === 1) orphan = true;
       else {
         const parent = await system.facts(facts.parentPid).catch(() => null);
@@ -161,6 +178,7 @@ export async function describeLeftovers(
     out.push({
       pid,
       start: facts.start,
+      commandKey: keyOf(facts.command),
       program: programOf(facts.command),
       ...(runningMs !== undefined ? { runningMs } : {}),
       ...(startedBy ? { startedBy } : {}),
@@ -190,62 +208,52 @@ export function shownLeftover(entry: Leftover): WorktreeLeftoverProcess {
 const POLL_MS = 100;
 const KILL_WAIT_MS = 2_000;
 
+type Seen = "gone" | "unknown" | ProcessFacts;
+
 /**
  * Stops exactly `list` (confirmed, none blocked): SIGTERM, then SIGKILL for
- * what is left after the grace. Returns those still running inside the
- * worktree at the end, with why; a process that moved out of it, or whose pid
- * now belongs to another process, is left alone and is not counted.
+ * what is left after the grace, each by its own pid. Returns those still
+ * running inside the worktree at the end, or whose state could not be read,
+ * with why. One that moved out of the worktree is left alone and not counted;
+ * a pid that now belongs to another process is gone.
  */
 export async function stopLeftovers(
   system: LeftoverSystem,
   real: string,
   list: readonly Leftover[],
 ): Promise<Array<{ entry: Leftover; why: string }>> {
-  const confirmed = new Map(list.map((entry) => [entry.pid, entry.start]));
-  const same = async (pid: number, start: string | undefined) => {
-    const facts = await system.facts(pid).catch(() => null);
-    return facts && !facts.zombie && start !== undefined && facts.start === start ? facts : null;
+  const look = async (entry: Leftover): Promise<Seen> => {
+    let facts: ProcessFacts | null;
+    try {
+      facts = await system.facts(entry.pid);
+    } catch {
+      return "unknown";
+    }
+    if (!facts || facts.zombie || facts.start !== entry.start || keyOf(facts.command) !== entry.commandKey) return "gone";
+    return facts;
   };
-  const inside = async (pid: number, start: string | undefined) => {
-    const facts = await same(pid, start);
-    return facts && facts.cwd !== null && isAtOrUnder(facts.cwd, real) ? facts : null;
-  };
+  const inside = (seen: Seen) => typeof seen === "object" && seen.cwd !== null && isAtOrUnder(seen.cwd, real);
   const send = async (targets: readonly Leftover[], signal: "SIGTERM" | "SIGKILL") => {
-    const table = await system.table().catch(() => null);
-    const groups = new Set<number>();
     for (const entry of targets) {
-      const facts = await inside(entry.pid, entry.start);
-      if (!facts) continue;
-      let whole = false;
-      if (table && facts.group > 1 && confirmed.has(facts.group)) {
-        const members = table.filter((row) => row.group === facts.group);
-        whole = members.length > 0 && members.every((row) => confirmed.has(row.pid));
-        for (const member of whole ? members : []) {
-          if (!(await inside(member.pid, confirmed.get(member.pid)))) whole = false;
-        }
-      }
+      if (!inside(await look(entry))) continue;
       try {
-        if (whole) {
-          if (groups.has(facts.group)) continue;
-          groups.add(facts.group);
-          system.signal(-facts.group, signal);
-        } else system.signal(entry.pid, signal);
+        system.signal(entry.pid, signal);
       } catch {
         /* Gone between the check and the signal. */
       }
     }
   };
-  const running = async (targets: readonly Leftover[]) => {
-    const alive: Leftover[] = [];
-    for (const entry of targets) if (await same(entry.pid, entry.start)) alive.push(entry);
-    return alive;
-  };
   const waitFor = async (targets: readonly Leftover[], ms: number) => {
     const until = system.now() + ms;
-    let left = await running(targets);
+    const alive = async (entries: readonly Leftover[]) => {
+      const out: Leftover[] = [];
+      for (const entry of entries) if ((await look(entry)) !== "gone") out.push(entry);
+      return out;
+    };
+    let left = await alive(targets);
     while (left.length && system.now() < until) {
       await system.wait(POLL_MS);
-      left = await running(left);
+      left = await alive(left);
     }
     return left;
   };
@@ -257,7 +265,9 @@ export async function stopLeftovers(
   }
   const failed: Array<{ entry: Leftover; why: string }> = [];
   for (const entry of left) {
-    if (await inside(entry.pid, entry.start)) failed.push({ entry, why: "it did not stop, even when forced" });
+    const seen = await look(entry);
+    if (seen === "unknown") failed.push({ entry, why: "whether it stopped could not be read" });
+    else if (inside(seen)) failed.push({ entry, why: "it did not stop, even when forced" });
   }
   return failed;
 }
@@ -266,12 +276,18 @@ export async function stopLeftovers(
 
 const CLOCK_TICKS_PER_SECOND = 100;
 
-function run(file: string, args: string[]): Promise<string | null> {
+function run(file: string, args: string[]): Promise<{ code: number | null; stdout: string }> {
   return new Promise((done) => {
-    execFile(file, args, { timeout: 3_000, maxBuffer: 8 * 1024 * 1024, env: psTimeEnvironment(), windowsHide: true }, (error, stdout) =>
-      done(error ? null : String(stdout)),
-    );
+    execFile(file, args, { timeout: 3_000, maxBuffer: 8 * 1024 * 1024, env: psTimeEnvironment(), windowsHide: true }, (error, stdout) => {
+      const code = error ? (typeof (error as { code?: unknown }).code === "number" ? ((error as { code: number }).code) : null) : 0;
+      done({ code, stdout: String(stdout ?? "") });
+    });
   });
+}
+
+function goneCode(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "ESRCH";
 }
 
 async function linuxBoot(): Promise<number | null> {
@@ -280,50 +296,67 @@ async function linuxBoot(): Promise<number | null> {
   return match ? Number(match[1]) : null;
 }
 
-function linuxStat(text: string): { state: string; parentPid: number; group: number; ticks: string; name: string } | null {
+function linuxStat(text: string): { state: string; parentPid: number; ticks: string; name: string } | null {
   const open = text.indexOf("(");
   const close = text.lastIndexOf(")");
   if (open < 0 || close < open) return null;
   const fields = text.slice(close + 2).split(" ");
   const parentPid = Number(fields[1]);
-  const group = Number(fields[2]);
-  if (!Number.isSafeInteger(parentPid) || !Number.isSafeInteger(group) || !/^\d+$/.test(fields[19] ?? "")) return null;
-  return { state: fields[0], parentPid, group, ticks: fields[19], name: text.slice(open + 1, close) };
+  if (!Number.isSafeInteger(parentPid) || !/^\d+$/.test(fields[19] ?? "")) return null;
+  return { state: fields[0], parentPid, ticks: fields[19], name: text.slice(open + 1, close) };
+}
+
+// Null when it is gone; throws when it cannot be read.
+async function linuxStatOf(pid: number): Promise<NonNullable<ReturnType<typeof linuxStat>> | null> {
+  let text: string;
+  try {
+    text = (await readProcFile(`/proc/${pid}/stat`)).toString("utf8");
+  } catch (err) {
+    if (goneCode(err)) return null;
+    throw err;
+  }
+  const parsed = linuxStat(text);
+  if (!parsed) throw new Error(`/proc/${pid}/stat could not be read`);
+  return parsed;
 }
 
 async function linuxFacts(pid: number): Promise<ProcessFacts | null> {
-  const stat = await readProcFile(`/proc/${pid}/stat`).catch(() => null);
-  const parsed = stat ? linuxStat(stat.toString("utf8")) : null;
-  if (!parsed) return null;
-  const [cwd, argv, boot] = await Promise.all([
+  const before = await linuxStatOf(pid);
+  if (!before) return null;
+  const [cwd, argv, cgroup, boot] = await Promise.all([
     fsp.readlink(`/proc/${pid}/cwd`).catch(() => null),
     readProcFile(`/proc/${pid}/cmdline`).catch(() => Buffer.alloc(0)),
+    readProcFile(`/proc/${pid}/cgroup`).then((text) => text.toString("utf8").trim(), () => null),
     linuxBoot(),
   ]);
+  // Read on both sides: a pid reused between the reads is not this process.
+  const after = await linuxStatOf(pid);
+  if (!after) return null;
+  if (after.ticks !== before.ticks) throw new Error(`process ${pid} changed while it was read`);
   const words = argv.toString("utf8").split("\0").filter(Boolean);
   return {
     pid,
-    parentPid: parsed.parentPid,
-    group: parsed.group,
-    start: parsed.ticks,
-    startedAtMs: boot === null ? null : (boot + Number(parsed.ticks) / CLOCK_TICKS_PER_SECOND) * 1000,
+    parentPid: after.parentPid,
+    start: after.ticks,
+    startedAtMs: boot === null ? null : (boot + Number(after.ticks) / CLOCK_TICKS_PER_SECOND) * 1000,
     cwd: cwd ? cwd.replace(/ \(deleted\)$/, "") : null,
-    command: words.length ? words.join(" ") : `[${parsed.name}]`,
-    zombie: parsed.state === "Z" || parsed.state === "X",
+    command: words.length ? words.join(" ") : `[${after.name}]`,
+    zombie: after.state === "Z" || after.state === "X",
+    cgroup: cgroup || null,
   };
 }
 
-async function linuxTable(): Promise<Array<{ pid: number; parentPid: number; group: number }> | null> {
+async function linuxTable(): Promise<Array<{ pid: number; parentPid: number }> | null> {
   const names = await fsp.readdir("/proc").catch(() => null);
   if (!names) return null;
   const pids = names.filter((name) => /^\d+$/.test(name)).map(Number);
-  const rows: Array<{ pid: number; parentPid: number; group: number }> = [];
+  const rows: Array<{ pid: number; parentPid: number }> = [];
   for (let i = 0; i < pids.length; i += 64) {
     const batch = await Promise.all(
       pids.slice(i, i + 64).map(async (pid) => {
         const stat = await readProcFile(`/proc/${pid}/stat`).catch(() => null);
         const parsed = stat ? linuxStat(stat.toString("utf8")) : null;
-        return parsed ? { pid, parentPid: parsed.parentPid, group: parsed.group } : null;
+        return parsed ? { pid, parentPid: parsed.parentPid } : null;
       }),
     );
     for (const row of batch) if (row) rows.push(row);
@@ -331,36 +364,49 @@ async function linuxTable(): Promise<Array<{ pid: number; parentPid: number; gro
   return rows.length ? rows : null;
 }
 
-const PS_FACTS = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s?(.*)$/;
+const PS_FACTS = /^\s*(\d+)\s+(\S+)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s?(.*)$/;
+
+// Null when it is gone (ps lists nothing and says so); throws otherwise.
+async function macPs(pid: number): Promise<{ parentPid: number; state: string; start: string; command: string } | null> {
+  const out = await run("ps", ["-o", "ppid=,stat=,lstart=,args=", "-p", String(pid)]);
+  const match = PS_FACTS.exec(out.stdout.split(/\r?\n/)[0] ?? "");
+  if (!match) {
+    if (out.code === 1 && !out.stdout.trim()) return null;
+    throw new Error(`ps could not read process ${pid}`);
+  }
+  return { parentPid: Number(match[1]), state: match[2], start: match[3].replace(/\s+/g, " "), command: match[4] ?? "" };
+}
 
 async function macFacts(pid: number): Promise<ProcessFacts | null> {
-  const out = await run("ps", ["-o", "ppid=,pgid=,stat=,lstart=,args=", "-p", String(pid)]);
-  const match = out ? PS_FACTS.exec(out.split(/\r?\n/)[0] ?? "") : null;
-  if (!match) return null;
+  const before = await macPs(pid);
+  if (!before) return null;
   const lsof = await run("/usr/sbin/lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"]);
-  const cwd = lsof?.split(/\r?\n/).find((line) => line.startsWith("n/"))?.slice(1) ?? null;
-  const start = match[4].replace(/\s+/g, " ");
-  const startedAtMs = Date.parse(start);
+  const cwd = lsof.stdout.split(/\r?\n/).find((line) => line.startsWith("n/"))?.slice(1) ?? null;
+  // ps gives the start to the second only: the command line must match too.
+  const after = await macPs(pid);
+  if (!after) return null;
+  if (after.start !== before.start || after.command !== before.command) throw new Error(`process ${pid} changed while it was read`);
+  const startedAtMs = Date.parse(after.start);
   return {
     pid,
-    parentPid: Number(match[1]),
-    group: Number(match[2]),
-    start,
+    parentPid: after.parentPid,
+    start: after.start,
     startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : null,
     cwd,
-    command: match[5] ?? "",
-    zombie: match[3].includes("Z"),
+    command: after.command,
+    zombie: after.state.includes("Z"),
+    cgroup: null,
   };
 }
 
-async function macTable(): Promise<Array<{ pid: number; parentPid: number; group: number }> | null> {
-  const out = await run("ps", ["-axo", "pid=,ppid=,pgid="]);
-  if (!out) return null;
-  const rows = out
+async function macTable(): Promise<Array<{ pid: number; parentPid: number }> | null> {
+  const out = await run("ps", ["-axo", "pid=,ppid="]);
+  if (out.code !== 0) return null;
+  const rows = out.stdout
     .split(/\r?\n/)
     .map((line) => line.trim().split(/\s+/).map(Number))
-    .filter((cols) => cols.length === 3 && cols.every(Number.isSafeInteger))
-    .map(([pid, parentPid, group]) => ({ pid, parentPid, group }));
+    .filter((cols) => cols.length === 2 && cols.every(Number.isSafeInteger))
+    .map(([pid, parentPid]) => ({ pid, parentPid }));
   return rows.length ? rows : null;
 }
 
@@ -374,8 +420,8 @@ export function systemLeftovers(options: { appPid: number; sessionPids: () => re
     facts: linux ? linuxFacts : macFacts,
     table: linux ? linuxTable : macTable,
     signal: (pid, signal) => {
-      // Never the whole session, init or Codara itself.
-      if (pid === 0 || pid === -1 || Math.abs(pid) === 1 || Math.abs(pid) === options.appPid) return;
+      // One process, never a group, init or Codara itself.
+      if (!Number.isSafeInteger(pid) || pid <= 1 || pid === options.appPid) return;
       process.kill(pid, signal);
     },
     wait: (ms) => new Promise((done) => setTimeout(done, ms)),

@@ -400,96 +400,100 @@ test("Clean up stops a program left running in a merged worktree, after naming i
     }
   };
 
-  await writeFile(
-    join(home, "spark-state.json"),
-    JSON.stringify({
-      activeWorkspaceId: "ws-repo",
-      workspaces: [
-        { id: "ws-repo", name: "Repo", cwd: repo, color: "#42D6C7", workers: [] },
-        copyWorkspace("ws-served", "Demo server", served, repo, "feature/demo", before),
-        copyWorkspace("ws-plain", "Plain copy", plain, repo, "feature/plain", before),
-        copyWorkspace("ws-drafted", "Drafted copy", drafted, repo, "feature/drafted", before),
-      ],
-    }),
-  );
-  const app = await electron.launch({
-    args: ["."],
-    env: {
-      ...gitEnv,
-      HOME: userHome,
-      CODARA_HOME_DIR: home,
-      SPARK_HOME_DIR: home,
-      SPARK_USER_DATA_DIR: home,
-      SPARK_SKIP_LEGACY_MIGRATION: "1",
-      SPARK_NO_SHELL_INTEGRATION: "1",
-      SPARK_ALLOW_MULTI: "1",
-      SPARK_E2E_BACKGROUND: "1",
-      CODARA_CHROME_LINK: "0",
-    },
-  });
-  const setTheme = (page: Page, mode: "dark" | "light") =>
-    page.evaluate((next) => {
-      const root = document.documentElement;
-      root.dataset.theme = next === "light" ? "codara-daylight" : "codara-classic";
-      root.dataset.themeMode = next;
-      root.classList.toggle("light", next === "light");
-    }, mode);
-  // Light and dark. Below 1050 px the workspaces panel is an overlay opened
-  // from the title bar, and closing it drops an open question, so each width
-  // is shot from its own click.
-  const resize = (width: number, height: number) =>
-    app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0]?.setSize(size[0], size[1]), [width, height]);
-  const shots = async (page: Page, name: string, width: number) => {
-    for (const mode of ["light", "dark"] as const) {
-      await setTheme(page, mode);
-      await page.waitForTimeout(250);
-      await page.screenshot({ path: testInfo.outputPath(`${name}-${width}-${mode}.png`) });
-    }
-  };
+  // From here on, the server is stopped by its exact pid whatever fails.
   try {
-    const page = await app.firstWindow();
-    await page.waitForLoadState("domcontentloaded");
-    const fold = page.locator('[data-rail-children-of="ws-repo"]').getByTestId("workspace-merged-fold");
-    const notice = page.locator('[data-rail-children-of="ws-repo"]').getByTestId("workspace-merged-notice");
-    await expect(fold).toContainText("3 merged", { timeout: 30_000 });
-
-    const confirm = page.getByTestId("workspace-merged-clean-up-confirm");
-    const ask = async () => {
-      await fold.getByTestId("workspace-merged-clean-up").click();
-      await expect(confirm).toContainText("Clean up 2 merged worktrees?", { timeout: 30_000 });
-      await expect(confirm).toContainText(`Demo server: stops node server.js (pid ${serverPid}), running`);
-      await expect(confirm.locator("li", { hasText: "Plain copy" })).toHaveText("Plain copy");
-      await expect(notice).toContainText("Drafted copy: It has uncommitted work (notes.txt). Commit it, or use Delete to review it.");
+    await writeFile(
+      join(home, "spark-state.json"),
+      JSON.stringify({
+        activeWorkspaceId: "ws-repo",
+        workspaces: [
+          { id: "ws-repo", name: "Repo", cwd: repo, color: "#42D6C7", workers: [] },
+          copyWorkspace("ws-served", "Demo server", served, repo, "feature/demo", before),
+          copyWorkspace("ws-plain", "Plain copy", plain, repo, "feature/plain", before),
+          copyWorkspace("ws-drafted", "Drafted copy", drafted, repo, "feature/drafted", before),
+        ],
+      }),
+    );
+    const app = await electron.launch({
+      args: ["."],
+      env: {
+        ...gitEnv,
+        HOME: userHome,
+        CODARA_HOME_DIR: home,
+        SPARK_HOME_DIR: home,
+        SPARK_USER_DATA_DIR: home,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
+        SPARK_NO_SHELL_INTEGRATION: "1",
+        SPARK_ALLOW_MULTI: "1",
+        SPARK_E2E_BACKGROUND: "1",
+        CODARA_CHROME_LINK: "0",
+      },
+    });
+    const setTheme = (page: Page, mode: "dark" | "light") =>
+      page.evaluate((next) => {
+        const root = document.documentElement;
+        root.dataset.theme = next === "light" ? "codara-daylight" : "codara-classic";
+        root.dataset.themeMode = next;
+        root.classList.toggle("light", next === "light");
+      }, mode);
+    // Light and dark. Below 1050 px the workspaces panel is an overlay opened
+    // from the title bar, and closing it drops an open question, so each width
+    // is shot from its own click.
+    const resize = (width: number, height: number) =>
+      app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0]?.setSize(size[0], size[1]), [width, height]);
+    const shots = async (page: Page, name: string, width: number) => {
+      for (const mode of ["light", "dark"] as const) {
+        await setTheme(page, mode);
+        await page.waitForTimeout(250);
+        await page.screenshot({ path: testInfo.outputPath(`${name}-${width}-${mode}.png`) });
+      }
     };
-    await resize(720, 480);
-    await page.getByTitle("Toggle workspaces").click();
-    await ask();
-    await shots(page, "rail-clean-up-stop-confirm", 720);
-    await confirm.getByRole("button", { name: "Cancel" }).click();
-    await shots(page, "rail-clean-up-refusal-line", 720);
-    await resize(1280, 800);
-    await ask();
-    await shots(page, "rail-clean-up-stop-confirm", 1280);
-    expect(alive(serverPid)).toBe(true);
+    try {
+      const page = await app.firstWindow();
+      await page.waitForLoadState("domcontentloaded");
+      const fold = page.locator('[data-rail-children-of="ws-repo"]').getByTestId("workspace-merged-fold");
+      const notice = page.locator('[data-rail-children-of="ws-repo"]').getByTestId("workspace-merged-notice");
+      await expect(fold).toContainText("3 merged", { timeout: 30_000 });
 
-    await confirm.getByRole("button", { name: "Stop and clean up" }).click();
-    // The button counts through them while it works.
-    await expect(fold.getByTestId("workspace-merged-clean-up")).toHaveText(/^Cleaning [12] of 2…$/);
-    await expect(fold).toContainText("1 merged", { timeout: 60_000 });
-    await expect(fold.getByTestId("workspace-merged-clean-up")).toHaveText("Clean up");
-    await expect.poll(() => alive(serverPid), { timeout: 10_000 }).toBe(false);
-    expect(existsSync(served)).toBe(false);
-    expect(existsSync(plain)).toBe(false);
-    expect(branchExists(repo, "feature/demo", gitEnv)).toBe(false);
-    await fold.getByTestId("workspace-merged-toggle").click();
-    await expect(page.locator('[data-workspace-id="ws-drafted"]')).toBeVisible();
-    await expect(page.locator('[data-workspace-id="ws-served"]')).toHaveCount(0);
-    await expect(page.locator('[data-workspace-id="ws-plain"]')).toHaveCount(0);
-    await expect(notice).toContainText("Drafted copy: It has uncommitted work");
-    expect(existsSync(drafted)).toBe(true);
-    await shots(page, "rail-clean-up-refusal-line", 1280);
+      const confirm = page.getByTestId("workspace-merged-clean-up-confirm");
+      const ask = async () => {
+        await fold.getByTestId("workspace-merged-clean-up").click();
+        await expect(confirm).toContainText("Clean up 2 merged worktrees?", { timeout: 30_000 });
+        await expect(confirm).toContainText(`Demo server: stops node server.js (pid ${serverPid}), running`);
+        await expect(confirm.locator("li", { hasText: "Plain copy" })).toHaveText("Plain copy");
+        await expect(notice).toContainText("Drafted copy: It has uncommitted work (notes.txt). Commit it, or use Delete to review it.");
+      };
+      await resize(720, 480);
+      await page.getByTitle("Toggle workspaces").click();
+      await ask();
+      await shots(page, "rail-clean-up-stop-confirm", 720);
+      await confirm.getByRole("button", { name: "Cancel" }).click();
+      await shots(page, "rail-clean-up-refusal-line", 720);
+      await resize(1280, 800);
+      await ask();
+      await shots(page, "rail-clean-up-stop-confirm", 1280);
+      expect(alive(serverPid)).toBe(true);
+
+      await confirm.getByRole("button", { name: "Stop and clean up" }).click();
+      // The button counts through them while it works.
+      await expect(fold.getByTestId("workspace-merged-clean-up")).toHaveText(/^Cleaning [12] of 2…$/);
+      await expect(fold).toContainText("1 merged", { timeout: 60_000 });
+      await expect(fold.getByTestId("workspace-merged-clean-up")).toHaveText("Clean up");
+      await expect.poll(() => alive(serverPid), { timeout: 10_000 }).toBe(false);
+      expect(existsSync(served)).toBe(false);
+      expect(existsSync(plain)).toBe(false);
+      expect(branchExists(repo, "feature/demo", gitEnv)).toBe(false);
+      await fold.getByTestId("workspace-merged-toggle").click();
+      await expect(page.locator('[data-workspace-id="ws-drafted"]')).toBeVisible();
+      await expect(page.locator('[data-workspace-id="ws-served"]')).toHaveCount(0);
+      await expect(page.locator('[data-workspace-id="ws-plain"]')).toHaveCount(0);
+      await expect(notice).toContainText("Drafted copy: It has uncommitted work");
+      expect(existsSync(drafted)).toBe(true);
+      await shots(page, "rail-clean-up-refusal-line", 1280);
+    } finally {
+      await app.close().catch(() => undefined);
+    }
   } finally {
-    await app.close();
     if (alive(serverPid)) process.kill(serverPid, "SIGKILL");
     await rm(root, { recursive: true, force: true });
   }
