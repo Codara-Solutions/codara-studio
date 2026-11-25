@@ -3953,6 +3953,12 @@ export type ProcessScan = Map<string, ProcessUse[]> & {
    * judge: never stopped, and the worktree stays.
    */
   cwdUnknown?: Map<string, ProcessUse[]>;
+  /**
+   * Linux: the user's own processes whose working directory cannot be read
+   * at all (sandboxed or non-dumpable: a browser sandbox, ssh-agent). Nothing
+   * places them in any folder, so they hold none; named here only.
+   */
+  cwdUnreadable?: ProcessUse[];
 };
 
 /** A cwd reading: the folders placed, and the user's processes whose folder could not be (with the link text when there was one). */
@@ -4088,14 +4094,18 @@ export async function scanProcessesUnderCwds(
   const out: ProcessScan = new Map<string, ProcessUse[]>(dirs.map((dir) => [dir, []]));
   if (!open) out.openFilesUnknown = true;
   if (cwds.unknown?.size) {
-    // Where it may be: under the link's text when there is one (a deleted
-    // folder's text still starts with where it was), anywhere when not.
+    // Where it may be: under the link's text (a deleted folder's text still
+    // starts with where it was). With no text at all, nothing places it.
     const unknown = new Map<string, ProcessUse[]>();
+    const unreadable: ProcessUse[] = [];
     for (const entry of counted) {
       if (!cwds.unknown.has(entry.pid)) continue;
       const hint = cwds.unknown.get(entry.pid) ?? null;
+      if (hint === null) {
+        unreadable.push({ pid: entry.pid, command: cleanText(entry.command, 200) });
+        continue;
+      }
       const under = (dir: string) => {
-        if (hint === null) return true;
         const rest = hint.slice(dir.length);
         return hint.startsWith(dir) && (rest === "" || rest.startsWith("/") || rest.startsWith(" "));
       };
@@ -4106,6 +4116,7 @@ export async function scanProcessesUnderCwds(
       }
     }
     if (unknown.size) out.cwdUnknown = unknown;
+    if (unreadable.length) out.cwdUnreadable = unreadable;
   }
   for (const entry of counted) {
     const cwd = cwds.get(entry.pid);
