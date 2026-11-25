@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fsp, readFileSync } from "node:fs";
 import { basename } from "node:path";
@@ -429,8 +429,7 @@ export function systemLeftovers(options: { appPid: number; sessionPids: () => re
       if (linux) {
         // Read in the same instant as the signal, with nothing awaited in
         // between: a pid freed and reused has a later start. (Node offers no
-        // pidfd to bind it closer.) macOS gives no such read; the checks
-        // just before stand.
+        // pidfd to bind it closer.)
         let now: ReturnType<typeof linuxStat>;
         try {
           now = linuxStat(readFileSync(`/proc/${pid}/stat`, "utf8"));
@@ -438,6 +437,15 @@ export function systemLeftovers(options: { appPid: number; sessionPids: () => re
           return false;
         }
         if (!now || now.ticks !== start) return false;
+      } else {
+        // macOS: its start once more, just before the signal (to the second).
+        let now: string;
+        try {
+          now = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { env: psTimeEnvironment(), timeout: 2_000, encoding: "utf8" });
+        } catch {
+          return false;
+        }
+        if (now.trim().replace(/\s+/g, " ") !== start) return false;
       }
       process.kill(pid, signal);
       return true;
