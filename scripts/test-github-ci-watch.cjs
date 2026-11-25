@@ -975,6 +975,129 @@ test("timers: every five minutes while nobody uses the computer; shorter waits w
   fast.stop();
 });
 
+// ── Every row, one read per repository ─────────────────────────────────────
+
+test("every local row with an upstream is watched, not the first 24", async ({ mod }) => {
+  const workspaces = Array.from({ length: 30 }, (_, i) => ws(`ws-${i}`, `/repo-${i}`));
+  const refs = Object.fromEntries(workspaces.map((w, i) => [w.cwd, `h${i} u${i}`]));
+  const prs = Object.fromEntries(workspaces.map((w, i) => [w.cwd, pr(HEAD_A, { number: 100 + i })]));
+  const h = harness(mod, { workspaces, refs, prs });
+  await h.pass();
+  const shown = new Map(h.watch.entries().map((entry) => [entry.workspaceId, entry.pullRequest?.number]));
+  assert.equal(shown.size, 30);
+  assert.equal(shown.get("ws-29"), 129, "the thirtieth row shows its own pull request");
+});
+
+test("the rows of one repository share one read; a failed read errs only its rows", async ({ mod }) => {
+  const rows = Array.from({ length: 92 }, (_, i) => ws(`ws-${i}`, `/tree-${i}`));
+  const repositoryOf = (cwd) => `acme/repo-${Number(cwd.split("-")[1]) % 6}`;
+  const batches = [];
+  const logs = [];
+  const down = "acme/repo-0";
+  const watch = mod.createGitHubCiWatch({
+    loadState: async () => ({ workspaces: rows, workspaceGroups: [], activeWorkspaceId: null }),
+    enabled: () => true,
+    pathExists: async () => true,
+    localRefs: async (cwd) => ({ key: `${cwd} u`, host: "github.com", repository: repositoryOf(cwd), branch: `feat/${cwd.slice(1)}` }),
+    readPullRequest: async () => {
+      throw new Error("read one by one");
+    },
+    readPullRequests: async (items) => {
+      batches.push(items.map((item) => item.refs.repository));
+      if (items[0].refs.repository === down) throw new Error("gh: HTTP 502");
+      return new Map(items.map(({ cwd }) => [cwd, null]));
+    },
+    publish: () => undefined,
+    rearm: () => undefined,
+    now: () => 0,
+    setTimeout: () => ({}),
+    clearTimeout: () => undefined,
+    log: (message) => logs.push(message),
+  });
+  await watch.runPass();
+  assert.equal(batches.length, 6, "one read per repository for 92 rows");
+  assert.ok(batches.every((batch) => new Set(batch).size === 1), "a read covers one repository");
+  assert.equal(batches.flat().length, 92);
+  const failedRows = logs.map((line) => /pull request of (ws-\d+)/.exec(line)?.[1]);
+  assert.equal(failedRows.length, rows.filter((row) => repositoryOf(row.cwd) === down).length, "only the rows of the repository that failed");
+  assert.ok(failedRows.every((id) => repositoryOf(`/tree-${id.slice(3)}`) === down));
+});
+
+test("readRepositoryPullRequests: one list for the open ones, closed ones once, and a branch alone only when in neither", async ({ mod }) => {
+  const calls = [];
+  const label = (branch) => `acme:${branch}`;
+  const listed = (number, branch, extra = {}) => ({
+    number,
+    state: "open",
+    draft: false,
+    merged_at: null,
+    html_url: `https://github.com/acme/widgets/pull/${number}`,
+    title: `PR ${number}`,
+    head: { sha: HEAD_A, label: label(branch) },
+    ...extra,
+  });
+  const open = [listed(3, "feat/a"), listed(4, "feat/b", { draft: true })];
+  const closed = [listed(1, "feat/c", { state: "closed", merged_at: "2026-10-01T10:00:00Z" }), listed(2, "feat/c", { state: "closed" })];
+  const reader = {
+    get: async (url) => {
+      calls.push(url);
+      if (url.includes("pulls?state=open")) return { value: open };
+      if (url.includes("pulls?state=closed")) return { value: closed };
+      if (url.includes("pulls?head=")) return { value: [] };
+      if (url.endsWith("/acme/widgets")) return { value: { fork: false } };
+      if (url.includes("/check-runs")) return { value: { check_runs: [run("build", "completed", "cancelled")] } };
+      if (url.includes("/status")) return { value: { statuses: [] } };
+      throw new Error(`unexpected ${url}`);
+    },
+  };
+  const item = (branch) => ({ cwd: `/${branch}`, refs: { key: "k", host: "github.com", repository: "acme/widgets", branch } });
+  const answers = await mod.readRepositoryPullRequests(reader, [item("feat/a"), item("feat/b"), item("feat/c"), item("feat/none")]);
+  assert.equal(answers.get("/feat/a").number, 3);
+  assert.deepEqual(answers.get("/feat/a").failed, [], "a cancelled run is no failure");
+  assert.equal(answers.get("/feat/a").pending, 0, "and nothing still runs");
+  assert.equal(answers.get("/feat/b").phase, "draft");
+  assert.equal(answers.get("/feat/c").number, 2, "the newest of the branch's closed pull requests");
+  assert.equal(answers.get("/feat/none"), null);
+  const lists = calls.filter((url) => url.includes("pulls?state="));
+  assert.equal(lists.length, 2, "one open list and one closed list for four rows");
+  assert.equal(calls.filter((url) => url.includes("pulls?head=")).length, 1, "only the branch in neither list is asked alone");
+  // A full first page: an open pull request may be past it, so a closed one proves nothing.
+  calls.length = 0;
+  const full = Array.from({ length: 100 }, (_, i) => listed(1000 + i, `feat/other-${i}`));
+  const busy = { get: async (url) => (url.includes("pulls?state=open") ? (calls.push(url), { value: full }) : reader.get(url)) };
+  await mod.readRepositoryPullRequests(busy, [item("feat/c")]);
+  assert.ok(!calls.some((url) => url.includes("pulls?state=closed")), "the closed list is not read");
+  assert.equal(calls.filter((url) => url.includes("pulls?head=")).length, 1);
+  // The open list failing errs every row of the read.
+  const broken = await mod.readRepositoryPullRequests({ get: async () => { throw new Error("HTTP 502"); } }, [item("feat/a"), item("feat/b")]);
+  assert.ok([...broken.values()].every((value) => value instanceof Error));
+});
+
+test("a cancelled or stale run is no failure; the newest run of a check decides", ({ mod }) => {
+  const view = (runs) => mod.summarizeRestChecks({ check_runs: runs }, null);
+  const at = (minute) => `2026-10-01T10:${String(minute).padStart(2, "0")}:00Z`;
+  assert.deepEqual(view([run("build", "completed", "cancelled")]), { failed: [], failedAt: 0, pending: 0, passed: 0 });
+  assert.deepEqual(view([run("build", "completed", "stale")]).failed, []);
+  // Superseded: the run of another suite was cancelled when the newer one started.
+  const cancelled = { ...run("build", "completed", "cancelled", { started: at(0), completed: at(2) }), check_suite: { id: 1 } };
+  const passing = { ...run("build", "completed", "success", { started: at(1), completed: at(6) }), check_suite: { id: 2 } };
+  assert.deepEqual(view([cancelled, passing]), { failed: [], failedAt: 0, pending: 0, passed: 1 });
+  // A failed run followed by a newer one that failed again: still failing.
+  const failedAgain = run("build", "completed", "failure", { started: at(10), completed: at(12) });
+  assert.deepEqual(view([run("build", "completed", "cancelled", { started: at(5) }), failedAgain]).failed, ["build"]);
+});
+
+test("a pull request whose only bad run was cancelled prompts no one", async ({ mod }) => {
+  const summary = mod.summarizeRestChecks({ check_runs: [run("build", "completed", "cancelled"), run("lint", "completed", "success")] }, null);
+  const h = harness(mod, { prs: { "/repo": pr(HEAD_A, { passed: 1 }) } });
+  await h.pass();
+  h.prs["/repo"] = { ...pr(HEAD_B, summary), failedAt: Date.now() };
+  h.refs["/repo"] = "h2 u2";
+  await h.pass();
+  assert.deepEqual(h.published.filter((entry) => entry.kind === "git.ci-failed"), []);
+  assert.deepEqual(h.failing, []);
+});
+
 // ── Runner ──────────────────────────────────────────────────────────────────
 
 (async () => {
