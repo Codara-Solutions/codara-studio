@@ -125,7 +125,9 @@ export async function describeLeftovers(
       ancestors.push(up);
     }
     const session = ancestors.find((up) => sessions.has(up));
-    const appAt = ancestors.findIndex((up) => app.has(up));
+    // Below Codara itself, not merely below what started it: an orphan's
+    // new parent (the user's service manager) is often Codara's ancestor.
+    const appAt = ancestors.indexOf(system.appPid);
     const sessionAt = session === undefined ? -1 : ancestors.indexOf(session);
     let blocked: string | undefined;
     let startedBy: string | undefined;

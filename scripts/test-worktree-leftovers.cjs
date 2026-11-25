@@ -90,7 +90,9 @@ function fakeSystem() {
       zombie: false,
       ...extra,
     });
-  procs.set(100, { pid: 100, parentPid: 1, group: 100, start: "app", startedAtMs: 0, cwd: "/", command: "codara", zombie: false });
+  // Codara runs under the user's service manager, where orphans land too.
+  procs.set(50, { pid: 50, parentPid: 1, group: 50, start: "sd", startedAtMs: 0, cwd: "/", command: "/usr/lib/systemd/systemd --user", zombie: false });
+  procs.set(100, { pid: 100, parentPid: 50, group: 100, start: "app", startedAtMs: 0, cwd: "/", command: "codara", zombie: false });
   return { system, procs, signals, add };
 }
 
@@ -190,6 +192,9 @@ async function main() {
       assert.equal(by[800].blocked, "it is part of Codara");
       assert.equal(by[900].blocked, "it only has a file open in it. Close that file first");
       assert.equal(by[4040], undefined, "a process already gone is left out");
+      add(950, { cwd: W, parentPid: 50 });
+      const [orphan] = await leftovers.describeLeftovers(system, W, [950], panes);
+      assert.deepEqual([orphan.blocked, orphan.orphan], [undefined, true], "an orphan beside Codara is not Codara's");
     });
 
     // ── Clean up from the rail ──────────────────────────────────────────
@@ -233,7 +238,7 @@ async function main() {
         new Map(
           dirs.map((dir) => [
             dir,
-            [...fake.procs.values()].filter((entry) => entry.pid !== 100 && isUnder(entry.cwd, dir)).map(({ pid, command }) => ({ pid, command })),
+            [...fake.procs.values()].filter((entry) => entry.pid !== 100 && entry.pid !== 50 && isUnder(entry.cwd, dir)).map(({ pid, command }) => ({ pid, command })),
           ]),
         ),
       runningServers: () => 0,

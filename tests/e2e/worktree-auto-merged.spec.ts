@@ -301,7 +301,8 @@ test("with the setting off a merged worktree stays in the merged group, and turn
     await page.evaluate(() => window.spark.preferences.set("worktreeAutoRemoveMerged", true));
     await reread(page);
     await expect.poll(() => existsSync(dir), { timeout: 30_000 }).toBe(false);
-    expect(branchExists(world.repo, "fix/invoice-totals", world.gitEnv)).toBe(false);
+    // The folder leaves first (moved aside), its branch a moment later.
+    await expect.poll(() => branchExists(world.repo, "fix/invoice-totals", world.gitEnv), { timeout: 15_000 }).toBe(false);
   } finally {
     await app.close();
     await rm(world.root, { recursive: true, force: true });

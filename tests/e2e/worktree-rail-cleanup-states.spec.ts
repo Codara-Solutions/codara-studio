@@ -217,14 +217,13 @@ test("Clean up on the merged fold takes every worktree it counts", async ({}, te
 
     await fold.getByTestId("workspace-merged-clean-up").click();
     const confirm = page.getByTestId("workspace-merged-clean-up-confirm");
-    await expect(confirm).toContainText("Clean up 4 merged worktrees?");
-    await confirm.getByRole("button", { name: "Clean up" }).click();
-    // Only the .env is asked about; the rest are gone by then.
-    await expect(confirm).toContainText("Secrets copy holds .env", { timeout: 60_000 });
+    // One question for all four: the .env is named on its worktree's line.
+    await expect(confirm).toContainText("Clean up 4 merged worktrees?", { timeout: 60_000 });
+    await expect(confirm).toContainText("Secrets copy: deletes .env");
     await page.screenshot({ path: testInfo.outputPath("rail-states-ask.png") });
-    for (const dir of [deps, squash, made.path]) expect(existsSync(dir), dir).toBe(false);
+    await confirm.getByRole("button", { name: "Clean up" }).click();
+    for (const dir of [deps, squash, made.path]) await expect.poll(() => existsSync(dir), { timeout: 60_000 }).toBe(false);
     for (const branch of ["feat/deps", "feat/squash", "feat/agent"]) expect(branchExists(repo, branch, gitEnv), branch).toBe(false);
-    await confirm.getByRole("button", { name: "Remove anyway" }).click();
 
     await expect(fold).toHaveCount(0, { timeout: 60_000 });
     await expect(notice).toHaveCount(0);

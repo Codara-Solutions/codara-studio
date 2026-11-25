@@ -1,6 +1,6 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { _electron as electron } from "playwright";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, realpath, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -345,6 +345,152 @@ test("Clean up on the merged fold always says what it did", async ({}, testInfo)
     });
   } finally {
     await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// A dev server an agent started and never stopped holds a merged worktree:
+// the fold's Clean up names it in its one question, stops exactly it on the
+// yes, and the rows go. A worktree with uncommitted work says why it stays.
+test("Clean up stops a program left running in a merged worktree, after naming it", async ({}, testInfo) => {
+  test.setTimeout(180_000);
+  const root = await realpath(await mkdtemp(join(tmpdir(), "codara-worktree-rail-leftover-")));
+  const home = join(root, "home");
+  const userHome = join(root, "user-home");
+  const repo = join(root, "repo");
+  const trees = join(root, "trees");
+  const bin = join(root, "bin");
+  await Promise.all([mkdir(home), mkdir(userHome), mkdir(repo), mkdir(trees), mkdir(bin), mkdir(join(root, "gh"))]);
+  const gitConfig = join(root, "gitconfig");
+  await writeFile(gitConfig, "[user]\n\tname = Test\n\temail = test@example.com\n");
+  const clean = Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([key]) => !/^(SPARK_|CODARA_|CLAUDE_CONFIG_DIR$|CODEX_HOME$|GROK_HOME$|ZDOTDIR$)/.test(key),
+    ),
+  );
+  const gitEnv = { ...clean, GIT_CONFIG_GLOBAL: gitConfig, GIT_CONFIG_NOSYSTEM: "1", GH_CONFIG_DIR: join(root, "gh") };
+  execFileSync("git", ["init", "-q", "-b", "main", repo], { env: gitEnv });
+  await writeFile(join(repo, "README.md"), "# repo\n");
+  git(repo, ["add", "README.md"], gitEnv);
+  git(repo, ["commit", "-q", "-m", "init"], gitEnv);
+  const before = new Date(Date.now() - 60_000).toISOString();
+  const mergedTree = async (name: string, branch: string) => {
+    const dir = join(trees, name);
+    git(repo, ["worktree", "add", "-q", "-b", branch, dir], gitEnv);
+    await writeFile(join(dir, `${name}.txt`), `${name}\n`);
+    git(dir, ["add", `${name}.txt`], gitEnv);
+    git(dir, ["commit", "-q", "-m", name], gitEnv);
+    git(repo, ["merge", "-q", "--no-ff", "-m", `merge ${branch}`, branch], gitEnv);
+    return dir;
+  };
+  const served = await mergedTree("served", "feature/demo");
+  const plain = await mergedTree("plain", "feature/plain");
+  const drafted = await mergedTree("drafted", "feature/drafted");
+  await writeFile(join(drafted, "notes.txt"), "draft\n");
+  // The server script lives outside the worktree, which holds nothing uncommitted.
+  await writeFile(join(bin, "server.js"), "setInterval(() => {}, 1000);\n");
+  const server = spawn(process.execPath, [join(bin, "server.js")], { cwd: served, detached: true, stdio: "ignore" });
+  const serverPid = server.pid!;
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  await writeFile(
+    join(home, "spark-state.json"),
+    JSON.stringify({
+      activeWorkspaceId: "ws-repo",
+      workspaces: [
+        { id: "ws-repo", name: "Repo", cwd: repo, color: "#42D6C7", workers: [] },
+        copyWorkspace("ws-served", "Demo server", served, repo, "feature/demo", before),
+        copyWorkspace("ws-plain", "Plain copy", plain, repo, "feature/plain", before),
+        copyWorkspace("ws-drafted", "Drafted copy", drafted, repo, "feature/drafted", before),
+      ],
+    }),
+  );
+  const app = await electron.launch({
+    args: ["."],
+    env: {
+      ...gitEnv,
+      HOME: userHome,
+      CODARA_HOME_DIR: home,
+      SPARK_HOME_DIR: home,
+      SPARK_USER_DATA_DIR: home,
+      SPARK_SKIP_LEGACY_MIGRATION: "1",
+      SPARK_NO_SHELL_INTEGRATION: "1",
+      SPARK_ALLOW_MULTI: "1",
+      SPARK_E2E_BACKGROUND: "1",
+      CODARA_CHROME_LINK: "0",
+    },
+  });
+  const setTheme = (page: Page, mode: "dark" | "light") =>
+    page.evaluate((next) => {
+      const root = document.documentElement;
+      root.dataset.theme = next === "light" ? "codara-daylight" : "codara-classic";
+      root.dataset.themeMode = next;
+      root.classList.toggle("light", next === "light");
+    }, mode);
+  // Light and dark. Below 1050 px the workspaces panel is an overlay opened
+  // from the title bar, and closing it drops an open question, so each width
+  // is shot from its own click.
+  const resize = (width: number, height: number) =>
+    app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0]?.setSize(size[0], size[1]), [width, height]);
+  const shots = async (page: Page, name: string, width: number) => {
+    for (const mode of ["light", "dark"] as const) {
+      await setTheme(page, mode);
+      await page.waitForTimeout(250);
+      await page.screenshot({ path: testInfo.outputPath(`${name}-${width}-${mode}.png`) });
+    }
+  };
+  try {
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    const fold = page.locator('[data-rail-children-of="ws-repo"]').getByTestId("workspace-merged-fold");
+    const notice = page.locator('[data-rail-children-of="ws-repo"]').getByTestId("workspace-merged-notice");
+    await expect(fold).toContainText("3 merged", { timeout: 30_000 });
+
+    const confirm = page.getByTestId("workspace-merged-clean-up-confirm");
+    const ask = async () => {
+      await fold.getByTestId("workspace-merged-clean-up").click();
+      await expect(confirm).toContainText("Clean up 2 merged worktrees?", { timeout: 30_000 });
+      await expect(confirm).toContainText(`Demo server: stops node server.js (pid ${serverPid}), running`);
+      await expect(confirm.locator("li", { hasText: "Plain copy" })).toHaveText("Plain copy");
+      await expect(notice).toContainText("Drafted copy: It has uncommitted work (notes.txt). Commit it, or use Delete to review it.");
+    };
+    await resize(720, 480);
+    await page.getByTitle("Toggle workspaces").click();
+    await ask();
+    await shots(page, "rail-clean-up-stop-confirm", 720);
+    await confirm.getByRole("button", { name: "Cancel" }).click();
+    await shots(page, "rail-clean-up-refusal-line", 720);
+    await resize(1280, 800);
+    await ask();
+    await shots(page, "rail-clean-up-stop-confirm", 1280);
+    expect(alive(serverPid)).toBe(true);
+
+    await confirm.getByRole("button", { name: "Stop and clean up" }).click();
+    // The button counts through them while it works.
+    await expect(fold.getByTestId("workspace-merged-clean-up")).toHaveText(/^Cleaning [12] of 2…$/);
+    await expect(fold).toContainText("1 merged", { timeout: 60_000 });
+    await expect(fold.getByTestId("workspace-merged-clean-up")).toHaveText("Clean up");
+    await expect.poll(() => alive(serverPid), { timeout: 10_000 }).toBe(false);
+    expect(existsSync(served)).toBe(false);
+    expect(existsSync(plain)).toBe(false);
+    expect(branchExists(repo, "feature/demo", gitEnv)).toBe(false);
+    await fold.getByTestId("workspace-merged-toggle").click();
+    await expect(page.locator('[data-workspace-id="ws-drafted"]')).toBeVisible();
+    await expect(page.locator('[data-workspace-id="ws-served"]')).toHaveCount(0);
+    await expect(page.locator('[data-workspace-id="ws-plain"]')).toHaveCount(0);
+    await expect(notice).toContainText("Drafted copy: It has uncommitted work");
+    expect(existsSync(drafted)).toBe(true);
+    await shots(page, "rail-clean-up-refusal-line", 1280);
+  } finally {
+    await app.close();
+    if (alive(serverPid)) process.kill(serverPid, "SIGKILL");
     await rm(root, { recursive: true, force: true });
   }
 });
