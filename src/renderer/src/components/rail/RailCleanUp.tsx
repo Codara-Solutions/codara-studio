@@ -17,12 +17,6 @@ import {
 /** The worktrees whose removal is under way: their rows show it until they leave. */
 export const RailRemovingContext = createContext<ReadonlySet<string>>(new Set());
 
-/**
- * How many removals main is asked for at once. Its repository lock still
- * takes git's changes one at a time; meanwhile the next ones are checked.
- */
-export const REMOVALS_AT_ONCE = 3;
-
 /** What the user answered, sent back with the next try: the fingerprints of what they saw. */
 export type RailCleanUpAnswer = Pick<WorktreeRailCleanupRequest, "confirmIgnored" | "confirmStop" | "preview">;
 
@@ -129,9 +123,12 @@ export function useRailCleanUp(liveIds: readonly string[]) {
         }
       };
       try {
-        // Checks read only: all at once. Removals a few at a time.
+        // Checks read only: all at once. Removals one after another: main's
+        // repository lock covers each nearly whole (both walks of the folder
+        // and its delete), so asking for more at once saves almost nothing,
+        // and one waiting behind a removal of minutes would give up.
         const queue = [...entries];
-        const lanes = preview ? entries.length : Math.min(REMOVALS_AT_ONCE, entries.length);
+        const lanes = preview ? entries.length : 1;
         await Promise.all(
           Array.from({ length: lanes }, async () => {
             for (let entry = queue.shift(); entry; entry = queue.shift()) await one(entry);

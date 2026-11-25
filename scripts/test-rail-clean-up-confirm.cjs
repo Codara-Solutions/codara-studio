@@ -289,9 +289,9 @@ async function main() {
     });
     await expect(confirm).toContainText("Clean up 4 merged worktrees?");
 
-    // On yes, before any removal has finished, the button counts and the
-    // rows being removed say so; three go at once, and each row leaves as
-    // soon as its own removal is done.
+    // On yes, before the first removal has finished, the button counts and
+    // the row being removed says so; each row leaves as soon as its own
+    // removal is done, and the next one says so in turn.
     await page.evaluate(() => {
       window.hold = true;
       window.releases = {};
@@ -302,20 +302,20 @@ async function main() {
     await confirm.getByRole("button", { name: "Clean up" }).click();
     await expect(cleanUp).toHaveText("Cleaning 1 of 4…");
     await expect(cleanUp).toBeDisabled();
-    await expect(rows).toHaveText(["a: Removing…", "b: Removing…", "c: Removing…", "d"]);
-    assert.deepEqual(await page.evaluate(() => Object.keys(window.releases).sort()), ["a", "b", "c"], "three at once, none finished");
+    await expect(rows).toHaveText(["a: Removing…", "b", "c", "d"]);
+    assert.deepEqual(await page.evaluate(() => Object.keys(window.releases)), ["a"], "the first removal is still running");
     await page.evaluate(() => {
-      window.releases.b();
-      window.setMergedNames((names) => names.filter((name) => name !== "b"));
+      window.releases.a();
+      window.setMergedNames((names) => names.filter((name) => name !== "a"));
     });
     await expect(cleanUp).toHaveText("Cleaning 2 of 4…");
-    await expect(rows).toHaveText(["a: Removing…", "c: Removing…", "d: Removing…"]);
+    await expect(rows).toHaveText(["b: Removing…", "c", "d"]);
     await page.evaluate(() => {
       window.hold = false;
-      for (const name of ["a", "c", "d"]) window.releases[name]();
+      window.releases.b();
     });
     await expect(cleanUp).toHaveText("Clean up");
-    await expect(rows).toHaveText(["a", "c", "d"]);
+    await expect(rows).toHaveText(["b", "c", "d"]);
     assert.deepEqual(errors, []);
     console.log("PASS the merged fold's Clean up confirm");
   } finally {
