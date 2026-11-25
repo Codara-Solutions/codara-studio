@@ -67,12 +67,37 @@ async function main() {
         plain = reader.get("/repo");
         fresh = reader.get("/repo", true);
       }
-      assert.equal(pending.length, before + 1, "one read, shared");
-      pending[before].reject(new Error("GitHub is down"));
+      // A plain caller joins a fresh read; a fresh caller never joins an older read.
+      assert.equal(pending.length, before + (freshFirst ? 1 : 2), freshFirst ? "one read, shared" : "the fresh call reads again");
+      for (const read of pending.slice(before)) read.reject(new Error("GitHub is down"));
       await assert.rejects(fresh, /GitHub is down/);
       assert.equal((await plain).merged[0].url, "second", "a plain caller may fall back");
     }
     console.log("ok - a caller that asked for fresh lists gets no old ones, and takes none from the others");
+
+    // A fresh call times out while a read begun before it later succeeds:
+    // that read's lists are not written as new, and the next plain read
+    // reads again.
+    const gens = pullRequestReader({ fetch, ttlMs: 60_000, timeoutMs: 50, now: () => clock });
+    const older = gens.get("/gen");
+    const olderGaveUp = assert.rejects(older, /did not answer in time/);
+    const olderRead = pending.at(-1);
+    const freshCall = gens.get("/gen", true);
+    const freshRead = pending.at(-1);
+    assert.notEqual(freshRead, olderRead, "the fresh call does not join the older read");
+    await assert.rejects(freshCall, /did not answer in time/);
+    await olderGaveUp;
+    olderRead.resolve(lists("stale"));
+    await new Promise((done) => setImmediate(done));
+    freshRead.reject(new Error("GitHub is down"));
+    await new Promise((done) => setImmediate(done));
+    const countBefore = pending.length;
+    const next = gens.get("/gen");
+    assert.equal(pending.length, countBefore + 1, "the next plain read reads again, not the stale lists");
+    pending.at(-1).resolve(lists("new"));
+    assert.equal((await next).merged[0].url, "new");
+    assert.equal((await gens.get("/gen")).merged[0].url, "new", "and its lists are cached");
+    console.log("ok - a read begun before a fresh call never writes its lists as new");
 
     // As the agent cleanup tool asks: fresh lists for its check, then plain
     // ones for the remote branch decision. After the fresh read failed, the
