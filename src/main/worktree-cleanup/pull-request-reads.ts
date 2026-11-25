@@ -45,6 +45,11 @@ export function pullRequestReader(options: {
         }),
       ]);
     } catch (err) {
+      // Fresh lists were asked for and could not be had: the old ones go, so
+      // the asker's next plain read (the agent tool's branch-deletion check)
+      // reads again instead of judging by them. Callers already waiting keep
+      // the fallback they came with.
+      if (fresh) cache.delete(root);
       if (cached) return cached.value;
       throw err;
     } finally {

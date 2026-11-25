@@ -52,6 +52,11 @@ async function main() {
     // and a plain caller joining that read still falls back, whoever came first.
     clock += 2_000;
     for (const freshFirst of [true, false]) {
+      // Known lists to fall back on (a failed fresh read drops them).
+      const warm = reader.get("/repo", true);
+      pending.at(-1).resolve(lists("second"));
+      await warm;
+      clock += 2_000;
       const before = pending.length;
       let fresh;
       let plain;
@@ -68,6 +73,23 @@ async function main() {
       assert.equal((await plain).merged[0].url, "second", "a plain caller may fall back");
     }
     console.log("ok - a caller that asked for fresh lists gets no old ones, and takes none from the others");
+
+    // As the agent cleanup tool asks: fresh lists for its check, then plain
+    // ones for the remote branch decision. After the fresh read failed, the
+    // plain read does not get the old lists: it reads again, and fails too.
+    const tool = pullRequestReader({ fetch, ttlMs: 60_000, timeoutMs: 50, now: () => clock });
+    const warm = tool.get("/tool");
+    pending.at(-1).resolve(lists("merged-before"));
+    assert.equal((await warm).merged[0].url, "merged-before");
+    const check = tool.get("/tool", true);
+    pending.at(-1).reject(new Error("GitHub is down"));
+    await assert.rejects(check, /GitHub is down/);
+    const before = pending.length;
+    const decision = tool.get("/tool");
+    assert.equal(pending.length, before + 1, "a new read, not the old lists");
+    pending.at(-1).reject(new Error("GitHub is still down"));
+    await assert.rejects(decision, /still down/);
+    console.log("ok - after a failed fresh read, the agent tool's next read gets no stale lists");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
