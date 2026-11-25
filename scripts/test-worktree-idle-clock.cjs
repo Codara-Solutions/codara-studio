@@ -102,6 +102,16 @@ async function main() {
       at("draft.txt", twoDays);
       assert.equal(days(await inspect.lastWorkAt(tree, head, repo, null)), 2, "a new file");
       fs.rmSync(path.join(tree, "draft.txt"));
+      // A file edited inside a new folder: the folder's own time stays old.
+      fs.mkdirSync(path.join(tree, "scratch"));
+      fs.writeFileSync(path.join(tree, "scratch", "a.txt"), "a\n");
+      fs.writeFileSync(path.join(tree, "scratch", "b.txt"), "b\n");
+      at("scratch/a.txt", old);
+      fs.utimesSync(path.join(tree, "scratch"), old, old);
+      at("scratch/b.txt", twoDays);
+      assert.equal(days(await inspect.lastWorkAt(tree, head, repo, null)), 2, "a file inside a new folder");
+      fs.rmSync(path.join(tree, "scratch"), { recursive: true });
+      fs.utimesSync(tree, old, old);
       fs.rmSync(path.join(tree, "notes.md"));
       assert.equal(days(await inspect.lastWorkAt(tree, head, repo, null)), 0, "a deletion leaves its folder's time");
       git(tree, ["checkout", "-q", "--", "notes.md"]);

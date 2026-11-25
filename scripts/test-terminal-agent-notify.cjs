@@ -84,6 +84,7 @@ const harnessPlugin = {
             "export function onExit(id, h){ globalThis.__TAN.exits.set(id, h); return () => globalThis.__TAN.exits.delete(id); }\n" +
             "export function readTailChunks(id){ return globalThis.__TAN.tails.get(id) ?? []; }\n" +
             "export function sessionPid(id){ return globalThis.__TAN.pids?.get(id) ?? null; }\n" +
+            "export function sessionCwd(id){ return globalThis.__TAN.cwds?.get(id) ?? null; }\n" +
             "export function sessionDimensions(id){ return globalThis.__TAN.dimensions?.get(id) ?? null; }\n" +
             "export function waitForSpawn(){ return Promise.resolve(true); }\n" +
             "export function write(id, data){ globalThis.__TAN.writes.push({ id, data }); }\n",
@@ -1470,6 +1471,7 @@ async function main() {
 
   // Claude clears its progress bar between two tool calls of one turn and
   // sets it again moments later; only a clear that holds ends the turn.
+  T.cwds = new Map([["progress", "/work/tree"]]);
   mod.syncTerminalNotifyPanes({ workspaceId: "ws-progress", panes: [
     { paneId: "progress", tabId: "tp", tabTitle: "claude", excluded: false, runtimeHint: "claude" },
   ] });
@@ -1485,6 +1487,19 @@ async function main() {
   feed("progress", "\x1b]9;4;0\x07");
   await sleep(1200);
   check("claude: a progress clear that holds announces the finish once", alertCount() === beforeProgress + 1);
+
+  // The worktree idle clock: a finished turn is not "now", and it outlives
+  // its pane, found by workspace or by the folder it ran in.
+  const inProgress = (workspaceId) => workspaceId === "ws-progress";
+  const inTree = (_workspaceId, cwd) => cwd === "/work/tree";
+  const endedAt = mod.terminalAgentLastTurnAt(inProgress);
+  check("idle clock: a finished turn is when it was", typeof endedAt === "number" && endedAt <= Date.now());
+  await sleep(60_000);
+  check("idle clock: an idle pane does not read as a turn now", mod.terminalAgentLastTurnAt(inProgress) === endedAt);
+  check("idle clock: found by the folder it ran in", mod.terminalAgentLastTurnAt(inTree) === endedAt);
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-progress", panes: [] });
+  check("idle clock: the turn outlives its closed pane", mod.terminalAgentLastTurnAt(inProgress) === endedAt);
+  check("idle clock: other workspaces see none of it", mod.terminalAgentLastTurnAt((id) => id === "ws-none") === null);
 
   mod.disposeAllTerminalAgentWatchers();
   check("explicit watcher disposal detaches every tap", T.taps.size === 0);

@@ -880,7 +880,10 @@ export async function lastWorkAt(
   agentTurnAt: number | null,
   status?: StatusCounts | null,
 ): Promise<number | null> {
-  const changed = status === undefined ? await readStatus(path, "normal").catch(() => null) : status;
+  let changed = status === undefined ? await readStatus(path, "normal").catch(() => null) : status;
+  // A new folder is listed once, and editing a file inside it leaves the
+  // folder's time alone: list the files in it.
+  if (changed?.untracked.some((entry) => entry.endsWith("/"))) changed = await readStatus(path, "all").catch(() => null);
   const times: number[] = agentTurnAt ? [agentTurnAt] : [];
   if (head) {
     const seconds = Number(await readGitText(root, ["log", "-1", "--format=%ct", head]));

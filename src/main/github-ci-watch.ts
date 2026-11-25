@@ -50,6 +50,8 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import type { AppState, Workspace } from "@shared/types";
 import type { CiAgentNudger, CiAgentPane, CiFailure } from "./ci-agent-nudge";
 
+// Repositories whose pull requests are read at the same time in one pass.
+export const CI_WATCH_REPOSITORIES_AT_ONCE = 3;
 export const CI_WATCH_FIRST_DELAY_MS = 45_000;
 export const CI_WATCH_TICK_MS = 60_000;
 // Nobody at the computer: a failure can wait a few minutes, so the watcher
@@ -440,95 +442,110 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
       if (!due) continue;
       dueReads.push({ cwd, group, ids, refs, repositoryOn, now, track, moved });
     }
-    const answers = await readGrouped(dueReads);
-    for (const { cwd, group, ids, refs, repositoryOn, now, track, moved } of dueReads) {
-      const switchedOff = (workspaceId: string): PullRequestWatchEntry => ({ workspaceId, repository: refs.repository, watching: false });
-      const pr = answers.has(cwd) ? answers.get(cwd)! : new Error("GitHub gave no answer for this branch");
-      if (pr instanceof Error) {
-        // Once per streak of errors, not every retry.
-        if (!track?.retryAt) deps.log(`could not read the pull request of ${group[0].name}: ${pr.message}`);
-        workspaces.set(cwd, {
-          refs: refs.key,
-          queriedAt: now,
-          interval: wait.open,
-          fingerprint: track?.fingerprint ?? "",
-          retryAt: now + wait.error,
-          on: repositoryOn,
-          repository: refs.repository,
-          changedAt: track?.changedAt ?? now,
-          nudging: track?.nudging ?? null,
-        });
-        continue;
-      }
-      const fingerprint = fingerprintOf(pr);
-      const open = pr !== null && (pr.phase === "open" || pr.phase === "draft");
-      const quiet = !moved && track!.fingerprint === fingerprint && !track!.retryAt;
-      const changedAt = quiet ? track!.changedAt : now;
-      let interval = wait.settled;
-      if (open) {
-        // Nothing new since the last look: wait twice as long, up to the
-        // settled interval. Running checks are asked every minute for a while
-        // first: they usually finish within minutes.
-        const running = pr!.pending > 0 && now - changedAt < CI_WATCH_PENDING_GRACE_MS;
-        interval = quiet && !running ? Math.min(track!.interval * 2, wait.settled) : wait.open;
-      }
-      const next: WorkspaceTrack = { refs: refs.key, queriedAt: now, interval, fingerprint, retryAt: 0, on: repositoryOn, repository: refs.repository, changedAt, nudging: null };
-      workspaces.set(cwd, next);
-      if (!pr) {
-        show(ids, repositoryOn ? null : switchedOff);
-        continue;
-      }
-      if (open && observe(group[0], pr, refs.branch, repositoryOn)) next.nudging = { repository: pr.repository, number: pr.number };
-      else if (!open) deps.nudger?.settled(pr.repository, pr.number);
-      if (!repositoryOn) {
-        show(ids, switchedOff);
-        continue;
-      }
-      // The row's repository is the remote's, which is what the switch is
-      // keyed on; a fork's pull request or a renamed repository can differ.
-      show(ids, (workspaceId) => ({
-        workspaceId,
-        repository: refs.repository,
-        watching: true,
-        pullRequest: {
-          workspaceId,
-          repository: pr!.repository.toLowerCase(),
-          number: pr!.number,
-          url: pr!.url,
-          title: pr!.title,
-          phase: pr!.phase,
-          checks: open ? checksOf(pr!) : "none",
-          failed: open ? pr!.failed : [],
-          headOid: pr!.headOid,
-        },
-      }));
-    }
+    // Each repository's rows as soon as its read is back: a passing result
+    // withdraws a queued failure line without waiting on a slow repository.
+    const byCwdDue = new Map(dueReads.map((due) => [due.cwd, due]));
+    await readGrouped(dueReads, (cwd, pr) => {
+      const due = byCwdDue.get(cwd);
+      if (due) apply(due, pr);
+    });
     for (const cwd of [...workspaces.keys()]) if (!byCwd.has(cwd)) workspaces.delete(cwd);
     unwatchRefs((cwd) => workspaces.has(cwd) || byCwd.has(cwd));
     retainNudges();
     show([...shown.keys()].filter((id) => !rows.has(id)), null);
   }
 
-  // One read per repository for its due rows (readPullRequests), else one per row.
-  async function readGrouped(items: ReadonlyArray<{ cwd: string; refs: CiLocalRefs }>): Promise<Map<string, CiPullRequestSnapshot | null | Error>> {
-    const answers = new Map<string, CiPullRequestSnapshot | null | Error>();
+  function apply({ group, ids, refs, repositoryOn, now, track, moved, cwd }: DueRead, pr: CiPullRequestSnapshot | null | Error): void {
+    const switchedOff = (workspaceId: string): PullRequestWatchEntry => ({ workspaceId, repository: refs.repository, watching: false });
+    if (pr instanceof Error) {
+      // Once per streak of errors, not every retry.
+      if (!track?.retryAt) deps.log(`could not read the pull request of ${group[0].name}: ${pr.message}`);
+      workspaces.set(cwd, {
+        refs: refs.key,
+        queriedAt: now,
+        interval: wait.open,
+        fingerprint: track?.fingerprint ?? "",
+        retryAt: now + wait.error,
+        on: repositoryOn,
+        repository: refs.repository,
+        changedAt: track?.changedAt ?? now,
+        nudging: track?.nudging ?? null,
+      });
+      return;
+    }
+    const fingerprint = fingerprintOf(pr);
+    const open = pr !== null && (pr.phase === "open" || pr.phase === "draft");
+    const quiet = !moved && track!.fingerprint === fingerprint && !track!.retryAt;
+    const changedAt = quiet ? track!.changedAt : now;
+    let interval = wait.settled;
+    if (open) {
+      // Nothing new since the last look: wait twice as long, up to the
+      // settled interval. Running checks are asked every minute for a while
+      // first: they usually finish within minutes.
+      const running = pr!.pending > 0 && now - changedAt < CI_WATCH_PENDING_GRACE_MS;
+      interval = quiet && !running ? Math.min(track!.interval * 2, wait.settled) : wait.open;
+    }
+    const next: WorkspaceTrack = { refs: refs.key, queriedAt: now, interval, fingerprint, retryAt: 0, on: repositoryOn, repository: refs.repository, changedAt, nudging: null };
+    workspaces.set(cwd, next);
+    if (!pr) {
+      show(ids, repositoryOn ? null : switchedOff);
+      return;
+    }
+    if (open && observe(group[0], pr, refs.branch, repositoryOn)) next.nudging = { repository: pr.repository, number: pr.number };
+    else if (!open) deps.nudger?.settled(pr.repository, pr.number);
+    if (!repositoryOn) {
+      show(ids, switchedOff);
+      return;
+    }
+    // The row's repository is the remote's, which is what the switch is
+    // keyed on; a fork's pull request or a renamed repository can differ.
+    show(ids, (workspaceId) => ({
+      workspaceId,
+      repository: refs.repository,
+      watching: true,
+      pullRequest: {
+        workspaceId,
+        repository: pr!.repository.toLowerCase(),
+        number: pr!.number,
+        url: pr!.url,
+        title: pr!.title,
+        phase: pr!.phase,
+        checks: open ? checksOf(pr!) : "none",
+        failed: open ? pr!.failed : [],
+        headOid: pr!.headOid,
+      },
+    }));
+  }
+
+  // One read per repository for its due rows (readPullRequests), else one per
+  // row; each answer goes to `answer` as soon as its read is back. A few
+  // repositories are read at once, so a slow one holds up none of the others.
+  async function readGrouped(
+    items: ReadonlyArray<{ cwd: string; refs: CiLocalRefs }>,
+    answer: (cwd: string, pr: CiPullRequestSnapshot | null | Error) => void,
+  ): Promise<void> {
     const asError = (cause: unknown) => (cause instanceof Error ? cause : new Error(String(cause)));
     const byRepository = new Map<string, Array<{ cwd: string; refs: CiLocalRefs }>>();
     for (const item of items) {
       const key = `${item.refs.host}\u0000${item.refs.repository}`;
       byRepository.set(key, [...(byRepository.get(key) ?? []), item]);
     }
-    for (const batch of byRepository.values()) {
+    const batches = [...byRepository.values()];
+    const readBatch = async (batch: Array<{ cwd: string; refs: CiLocalRefs }>): Promise<void> => {
       if (deps.readPullRequests) {
         const read = await deps.readPullRequests(batch).catch(asError);
         for (const { cwd } of batch) {
-          answers.set(cwd, read instanceof Error ? read : read.has(cwd) ? read.get(cwd)! : new Error("GitHub gave no answer for this branch"));
+          answer(cwd, read instanceof Error ? read : read.has(cwd) ? read.get(cwd)! : new Error("GitHub gave no answer for this branch"));
         }
-        continue;
+        return;
       }
-      for (const { cwd, refs } of batch) answers.set(cwd, await deps.readPullRequest(cwd, refs).catch(asError));
-    }
-    return answers;
+      for (const { cwd, refs } of batch) answer(cwd, await deps.readPullRequest(cwd, refs).catch(asError));
+    };
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < batches.length) await readBatch(batches[next++]);
+    };
+    await Promise.all(Array.from({ length: Math.min(CI_WATCH_REPOSITORIES_AT_ONCE, batches.length) }, worker));
   }
 
   function schedule(ms: number): void {
@@ -857,20 +874,36 @@ export function ghConfigDir(home: string): string {
 
 const PULLS_PAGE = 100;
 const PULLS_JQ = "[.[] | {number, state, draft, merged_at, html_url, title, head: {sha: .head.sha, label: .head.label}}]";
+// Branches asked about in one GraphQL query, and the pull requests read per
+// branch name (other forks' branches of the same name included).
+const BRANCHES_PER_QUERY = 40;
+const PULLS_PER_BRANCH = 10;
 
-type PullRequestReader = { get(path: string, options?: { jq?: string }): Promise<{ value: unknown }> };
+type PullRequestReader = {
+  get(path: string, options?: { jq?: string }): Promise<{ value: unknown }>;
+  // One GraphQL query; absent: each branch is asked about alone.
+  graphql?(query: string, variables: Record<string, string>): Promise<unknown>;
+};
+
+// `owner:branch`: the owner as GitHub spells it in any case, the branch exactly.
+function sameHead(label: string, owner: string, branch: string): boolean {
+  const colon = label.indexOf(":");
+  return colon > 0 && label.slice(0, colon).toLowerCase() === owner.toLowerCase() && label.slice(colon + 1) === branch;
+}
 
 // The branch's newest pull request, asked about alone; on the parent when the
 // branch was pushed to the user's fork.
 async function branchPull(reader: PullRequestReader, refs: CiLocalRefs): Promise<ReturnType<typeof parseRestPullRequest>> {
   const [owner] = refs.repository.split("/");
-  const pullsIn = (repository: string) =>
-    reader.get(`repos/${repository}/pulls?head=${encodeURIComponent(`${owner}:${refs.branch}`)}&state=all&per_page=5`);
-  let pull = parseRestPullRequest((await pullsIn(refs.repository)).value);
+  const pullsIn = async (repository: string) => {
+    const value = (await reader.get(`repos/${repository}/pulls?head=${encodeURIComponent(`${owner}:${refs.branch}`)}&state=all&per_page=5`)).value;
+    return Array.isArray(value) ? value.filter((item) => sameHead(text(record(record(item)?.head)?.label), owner, refs.branch)) : value;
+  };
+  let pull = parseRestPullRequest(await pullsIn(refs.repository));
   if (!pull) {
     const repo = record((await reader.get(`repos/${refs.repository}`, { jq: "{fork, parent: .parent.full_name}" })).value);
     const parent = repo?.fork === true ? normalizeRepository(repo.parent) : null;
-    if (parent) pull = parseRestPullRequest((await pullsIn(parent)).value);
+    if (parent) pull = parseRestPullRequest(await pullsIn(parent));
   }
   return pull;
 }
@@ -886,13 +919,67 @@ async function withChecks(reader: PullRequestReader, pull: NonNullable<ReturnTyp
   return { ...pull, ...summarizeRestChecks(runs.value, status.value) };
 }
 
+const GRAPHQL_PULL = `nodes { number state isDraft mergedAt url title headRefOid headRepositoryOwner { login } }`;
+
 /**
- * GitHubCiWatchDeps.readPullRequests over GitHub's REST API, for rows of one
- * repository: its open pull requests in one read (and its recently closed
- * ones, once, when a branch has none open), shared by all of them; a branch
- * found in neither is asked about alone, as readPullRequest does. Then the
- * checks of each open one. Every read is conditional, so a list that did not
- * change costs nothing against the rate limit.
+ * The newest pull request of each branch, open or not, in the repository or,
+ * for a branch with none there, in the parent it was forked from: one GraphQL
+ * query per BRANCHES_PER_QUERY branches. A branch whose page of same-named
+ * pull requests is full without one of its own is left out (asked alone).
+ */
+async function branchesPulls(
+  reader: PullRequestReader & { graphql: NonNullable<PullRequestReader["graphql"]> },
+  repository: string,
+  branches: readonly string[],
+): Promise<Map<string, ReturnType<typeof parseRestPullRequest>>> {
+  const [owner, name] = repository.split("/");
+  const found = new Map<string, ReturnType<typeof parseRestPullRequest>>();
+  for (let start = 0; start < branches.length; start += BRANCHES_PER_QUERY) {
+    const chunk = branches.slice(start, start + BRANCHES_PER_QUERY);
+    const variables: Record<string, string> = { owner, name };
+    const fields = chunk.map((branch, i) => {
+      variables[`b${i}`] = branch;
+      return `b${i}: pullRequests(headRefName: $b${i}, first: ${PULLS_PER_BRANCH}, orderBy: {field: CREATED_AT, direction: DESC}) { ${GRAPHQL_PULL} }`;
+    });
+    const query = `query(${["$owner: String!", "$name: String!", ...chunk.map((_, i) => `$b${i}: String!`)].join(", ")}) { repository(owner: $owner, name: $name) { ${fields.join(" ")} parent { ${fields.join(" ")} } } }`;
+    const repo = record(record(record(await reader.graphql(query, variables))?.data)?.repository);
+    if (!repo) throw new Error(`GitHub found no repository ${repository}`);
+    chunk.forEach((branch, i) => {
+      const pick = (place: unknown): { pull: ReturnType<typeof parseRestPullRequest>; complete: boolean } => {
+        const nodes = record(record(place)?.[`b${i}`])?.nodes;
+        if (!Array.isArray(nodes)) return { pull: null, complete: place == null };
+        const rest = nodes.flatMap((node) => {
+          const pull = record(node);
+          const login = text(record(pull?.headRepositoryOwner)?.login);
+          if (!pull || !sameHead(`${login}:${branch}`, owner, branch)) return [];
+          return [{
+            number: pull.number,
+            state: pull.state === "OPEN" ? "open" : "closed",
+            draft: pull.isDraft === true,
+            merged_at: pull.mergedAt ?? null,
+            html_url: pull.url,
+            title: pull.title,
+            head: { sha: pull.headRefOid, label: `${login}:${branch}` },
+          }];
+        });
+        return { pull: parseRestPullRequest(rest), complete: rest.length > 0 || nodes.length < PULLS_PER_BRANCH };
+      };
+      const own = pick(repo);
+      if (own.pull) return void found.set(branch, own.pull);
+      const parent = pick(repo.parent);
+      if (parent.pull) return void found.set(branch, parent.pull);
+      if (own.complete && parent.complete) found.set(branch, null);
+    });
+  }
+  return found;
+}
+
+/**
+ * GitHubCiWatchDeps.readPullRequests over GitHub's API, for rows of one
+ * repository: its open pull requests in one conditional REST read, shared by
+ * all of them; the branches with none open in one GraphQL query; a branch
+ * neither settles is asked about alone, as readPullRequest does. Then the
+ * checks of each open one.
  */
 export async function readRepositoryPullRequests(
   reader: PullRequestReader,
@@ -903,30 +990,31 @@ export async function readRepositoryPullRequests(
   if (!items.length) return answers;
   const { repository } = items[0].refs;
   const [owner] = repository.split("/");
-  const listed = async (state: "open" | "closed"): Promise<unknown[]> => {
-    const sort = state === "closed" ? "&sort=updated&direction=desc" : "";
-    const value = (await reader.get(`repos/${repository}/pulls?state=${state}${sort}&per_page=${PULLS_PAGE}`, { jq: PULLS_JQ })).value;
-    return Array.isArray(value) ? value : [];
-  };
   let open: unknown[];
   try {
-    open = await listed("open");
+    const value = (await reader.get(`repos/${repository}/pulls?state=open&per_page=${PULLS_PAGE}`, { jq: PULLS_JQ })).value;
+    open = Array.isArray(value) ? value : [];
   } catch (cause) {
     for (const { cwd } of items) answers.set(cwd, failure(cause));
     return answers;
   }
-  let closed: Promise<unknown[]> | null = null;
+  const openPull = (branch: string) =>
+    parseRestPullRequest(
+      open
+        .filter((item) => sameHead(text(record(record(item)?.head)?.label), owner, branch))
+        .sort((a, b) => Number(record(b)?.number) - Number(record(a)?.number)),
+    );
+  const pulls = new Map(items.map(({ refs }) => [refs.branch, openPull(refs.branch)]));
+  const rest = [...new Set(items.map(({ refs }) => refs.branch).filter((branch) => !pulls.get(branch)))];
+  let settled = new Map<string, ReturnType<typeof parseRestPullRequest>>();
+  if (rest.length && reader.graphql) {
+    // A query GitHub refuses leaves each branch to be asked alone.
+    settled = await branchesPulls(reader as Parameters<typeof branchesPulls>[0], repository, rest).catch(() => settled);
+  }
   for (const { cwd, refs } of items) {
     try {
-      const label = `${owner}:${refs.branch}`.toLowerCase();
-      const mine = (pulls: unknown[]) =>
-        pulls
-          .filter((item) => text(record(record(item)?.head)?.label).toLowerCase() === label)
-          .sort((a, b) => Number(record(b)?.number) - Number(record(a)?.number));
-      let pull = parseRestPullRequest(mine(open));
-      // A full page may leave open ones out: then a closed one proves nothing.
-      if (!pull && open.length < PULLS_PAGE) pull = parseRestPullRequest(mine(await (closed ??= listed("closed"))));
-      pull ??= await branchPull(reader, refs);
+      let pull = pulls.get(refs.branch) ?? null;
+      if (!pull) pull = settled.has(refs.branch) ? settled.get(refs.branch)! : await branchPull(reader, refs);
       answers.set(cwd, pull ? await withChecks(reader, pull) : null);
     } catch (cause) {
       answers.set(cwd, failure(cause));
@@ -978,18 +1066,25 @@ async function productionDeps(): Promise<{ deps: GitHubCiWatchDeps; stop: () => 
       return "";
     }
   };
-  const readers = new Map<string, ReturnType<typeof conditional.createConditionalGitHubReader>>();
-  const readerFor = (executablePath: string, host: string) => {
+  const readers = new Map<string, PullRequestReader>();
+  const readerFor = (executablePath: string, host: string): PullRequestReader => {
     let reader = readers.get(host);
     if (!reader) {
-      reader = conditional.createConditionalGitHubReader((args) =>
+      const gh = (args: string[]) =>
         github.runGitHubCliCommand({
           executablePath,
           args: host === "github.com" ? args : [...args.slice(0, 1), "--hostname", host, ...args.slice(1)],
           timeoutMs: github.GITHUB_CLI_READ_TIMEOUT_MS,
           maxOutputBytes: github.GITHUB_CLI_MAX_OUTPUT_BYTES,
-        }),
-      );
+        });
+      const rest = conditional.createConditionalGitHubReader(gh);
+      reader = {
+        get: (path, options) => rest.get(path, options),
+        async graphql(query, variables) {
+          const fields = Object.entries(variables).flatMap(([key, value]) => ["-f", `${key}=${value}`]);
+          return JSON.parse((await gh(["api", "graphql", "-f", `query=${query}`, ...fields])).stdout) as unknown;
+        },
+      };
       readers.set(host, reader);
     }
     return reader;

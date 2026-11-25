@@ -1023,9 +1023,8 @@ test("the rows of one repository share one read; a failed read errs only its row
   assert.ok(failedRows.every((id) => repositoryOf(`/tree-${id.slice(3)}`) === down));
 });
 
-test("readRepositoryPullRequests: one list for the open ones, closed ones once, and a branch alone only when in neither", async ({ mod }) => {
+test("readRepositoryPullRequests: one open list and one query for every other branch, however many", async ({ mod }) => {
   const calls = [];
-  const label = (branch) => `acme:${branch}`;
   const listed = (number, branch, extra = {}) => ({
     number,
     state: "open",
@@ -1033,44 +1032,118 @@ test("readRepositoryPullRequests: one list for the open ones, closed ones once, 
     merged_at: null,
     html_url: `https://github.com/acme/widgets/pull/${number}`,
     title: `PR ${number}`,
-    head: { sha: HEAD_A, label: label(branch) },
+    head: { sha: HEAD_A, label: `acme:${branch}` },
     ...extra,
   });
-  const open = [listed(3, "feat/a"), listed(4, "feat/b", { draft: true })];
-  const closed = [listed(1, "feat/c", { state: "closed", merged_at: "2026-10-01T10:00:00Z" }), listed(2, "feat/c", { state: "closed" })];
+  const node = (number, login, extra = {}) => ({
+    number,
+    state: "CLOSED",
+    isDraft: false,
+    mergedAt: null,
+    url: `https://github.com/acme/widgets/pull/${number}`,
+    title: `PR ${number}`,
+    headRefOid: HEAD_A,
+    headRepositoryOwner: { login },
+    ...extra,
+  });
+  // Same-named branches of other forks come back too, newest first.
+  const own = { "feat/c": [node(9, "someone"), node(2, "acme"), node(1, "acme", { state: "MERGED", mergedAt: "2026-10-01T10:00:00Z" })] };
+  const open = [listed(3, "feat/a"), listed(4, "feat/b", { draft: true }), listed(5, "feat/widget")];
+  const queries = [];
   const reader = {
     get: async (url) => {
       calls.push(url);
       if (url.includes("pulls?state=open")) return { value: open };
-      if (url.includes("pulls?state=closed")) return { value: closed };
       if (url.includes("pulls?head=")) return { value: [] };
       if (url.endsWith("/acme/widgets")) return { value: { fork: false } };
       if (url.includes("/check-runs")) return { value: { check_runs: [run("build", "completed", "cancelled")] } };
       if (url.includes("/status")) return { value: { statuses: [] } };
       throw new Error(`unexpected ${url}`);
     },
+    graphql: async (query, variables) => {
+      calls.push("graphql");
+      queries.push(variables);
+      const repository = { parent: null };
+      for (const [key, branch] of Object.entries(variables)) if (/^b\d+$/.test(key)) repository[key] = { nodes: own[branch] ?? [] };
+      return { data: { repository } };
+    },
   };
   const item = (branch) => ({ cwd: `/${branch}`, refs: { key: "k", host: "github.com", repository: "acme/widgets", branch } });
-  const answers = await mod.readRepositoryPullRequests(reader, [item("feat/a"), item("feat/b"), item("feat/c"), item("feat/none")]);
+  const quiet = Array.from({ length: 20 }, (_, i) => item(`feat/quiet-${i}`));
+  const answers = await mod.readRepositoryPullRequests(reader, [item("feat/a"), item("feat/b"), item("feat/c"), item("feat/none"), item("feat/Widget"), ...quiet]);
   assert.equal(answers.get("/feat/a").number, 3);
   assert.deepEqual(answers.get("/feat/a").failed, [], "a cancelled run is no failure");
   assert.equal(answers.get("/feat/a").pending, 0, "and nothing still runs");
   assert.equal(answers.get("/feat/b").phase, "draft");
-  assert.equal(answers.get("/feat/c").number, 2, "the newest of the branch's closed pull requests");
+  assert.equal(answers.get("/feat/c").number, 2, "the newest of the branch's own pull requests, not another fork's");
+  assert.equal(answers.get("/feat/c").phase, "closed");
   assert.equal(answers.get("/feat/none"), null);
-  const lists = calls.filter((url) => url.includes("pulls?state="));
-  assert.equal(lists.length, 2, "one open list and one closed list for four rows");
-  assert.equal(calls.filter((url) => url.includes("pulls?head=")).length, 1, "only the branch in neither list is asked alone");
-  // A full first page: an open pull request may be past it, so a closed one proves nothing.
+  assert.equal(answers.get("/feat/Widget"), null, "feat/widget's pull request is not feat/Widget's");
+  for (const row of quiet) assert.equal(answers.get(row.cwd), null);
+  const lists = calls.filter((url) => url.includes("pulls?state=") || url === "graphql" || url.includes("pulls?head="));
+  assert.deepEqual(lists.map((url) => (url === "graphql" ? url : url.split("?")[1].split("&")[0])), ["state=open", "graphql"], "25 rows: one open list and one query");
+  assert.equal(queries[0].owner, "acme");
+  assert.ok(Object.values(queries[0]).includes("feat/Widget"));
+  // The owner in any case is the same owner.
   calls.length = 0;
-  const full = Array.from({ length: 100 }, (_, i) => listed(1000 + i, `feat/other-${i}`));
-  const busy = { get: async (url) => (url.includes("pulls?state=open") ? (calls.push(url), { value: full }) : reader.get(url)) };
-  await mod.readRepositoryPullRequests(busy, [item("feat/c")]);
-  assert.ok(!calls.some((url) => url.includes("pulls?state=closed")), "the closed list is not read");
+  const shouty = { ...reader, get: async (url) => (url.includes("pulls?state=open") ? { value: [listed(7, "feat/x", { head: { sha: HEAD_A, label: "ACME:feat/x" } })] } : reader.get(url)) };
+  assert.equal((await mod.readRepositoryPullRequests(shouty, [item("feat/x")])).get("/feat/x").number, 7);
+  // A fork: the branch's pull request is on the parent.
+  const fork = {
+    get: reader.get,
+    graphql: async (_query, variables) => ({
+      data: { repository: { b0: { nodes: [] }, parent: { b0: { nodes: [node(40, "acme", { state: "OPEN", url: "https://github.com/upstream/widgets/pull/40" })] } } } },
+    }),
+  };
+  const forked = (await mod.readRepositoryPullRequests(fork, [item("feat/f")])).get("/feat/f");
+  assert.equal(forked.repository, "upstream/widgets");
+  assert.equal(forked.number, 40);
+  // A page full of other forks' same-named branches proves nothing: asked alone.
+  calls.length = 0;
+  const crowded = { get: reader.get, graphql: async () => ({ data: { repository: { b0: { nodes: Array.from({ length: 10 }, (_, i) => node(100 + i, `fork-${i}`)) }, parent: null } } }) };
+  assert.equal((await mod.readRepositoryPullRequests(crowded, [item("main")])).get("/main"), null);
+  assert.equal(calls.filter((url) => url.includes("pulls?head=")).length, 1);
+  // A refused query, or no query at all: each branch is asked alone, as before.
+  calls.length = 0;
+  await mod.readRepositoryPullRequests({ get: reader.get, graphql: async () => { throw new Error("HTTP 502"); } }, [item("feat/none"), item("feat/other")]);
+  assert.equal(calls.filter((url) => url.includes("pulls?head=")).length, 2);
+  calls.length = 0;
+  await mod.readRepositoryPullRequests({ get: reader.get }, [item("feat/none")]);
   assert.equal(calls.filter((url) => url.includes("pulls?head=")).length, 1);
   // The open list failing errs every row of the read.
   const broken = await mod.readRepositoryPullRequests({ get: async () => { throw new Error("HTTP 502"); } }, [item("feat/a"), item("feat/b")]);
   assert.ok([...broken.values()].every((value) => value instanceof Error));
+});
+
+test("a repository's rows apply as soon as its read is back, whatever another repository does", async ({ mod }) => {
+  const rows = [ws("ws-slow", "/slow"), ws("ws-fast", "/fast")];
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  const watch = mod.createGitHubCiWatch({
+    loadState: async () => ({ workspaces: rows, workspaceGroups: [], activeWorkspaceId: null }),
+    enabled: () => true,
+    pathExists: async () => true,
+    localRefs: async (cwd) => ({ key: `${cwd} u`, host: "github.com", repository: `acme${cwd}`, branch: "feat/x" }),
+    readPullRequest: async () => null,
+    readPullRequests: async (items) => {
+      if (items[0].cwd === "/slow") await held;
+      return new Map(items.map(({ cwd }) => [cwd, pr(HEAD_A, { number: cwd === "/fast" ? 7 : 8 })]));
+    },
+    publish: () => undefined,
+    rearm: () => undefined,
+    now: () => 0,
+    setTimeout: () => ({}),
+    clearTimeout: () => undefined,
+    log: () => undefined,
+  });
+  const passing = watch.runPass();
+  for (let i = 0; i < 20; i += 1) await Promise.resolve();
+  const shown = () => new Map(watch.entries().map((entry) => [entry.workspaceId, entry.pullRequest?.number]));
+  assert.equal(shown().get("ws-fast"), 7, "the fast repository's row is shown while the slow one reads");
+  assert.equal(shown().has("ws-slow"), false);
+  release();
+  await passing;
+  assert.equal(shown().get("ws-slow"), 8);
 });
 
 test("a cancelled or stale run is no failure; the newest run of a check decides", ({ mod }) => {

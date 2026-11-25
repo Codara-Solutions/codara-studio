@@ -940,6 +940,7 @@ function startTurn(w: PaneWatcher, now: number, source: AgentTurn["source"], ses
   }
   w.turn = { startedAt: now, source, sessionId, announced: false, announcedAt: 0 };
   w.lastTurnStartedAt = now;
+  noteTurnAt(w, now);
   w.finalMessage = null;
   // A turn held for background work is superseded; this one is announced.
   w.heldDone = null;
@@ -2622,6 +2623,7 @@ export function onTerminalAgentTurnEnded(listener: (event: TerminalAgentTurnEnd)
 function emitTurnEnded(w: PaneWatcher, failed: boolean, body: string | null, origin: DoneOrigin | null): void {
   const event = { paneId: w.paneId, failed, message: failed ? body : (w.finalMessage ?? body), at: Date.now() };
   w.lastTurnEnd = { at: event.at, failed, origin: failed ? null : origin };
+  noteTurnAt(w, event.at);
   for (const listener of turnEndListeners) {
     try {
       listener(event);
@@ -2768,19 +2770,55 @@ export function terminalAgentActivitySnapshot(): TerminalAgentActivity[] {
   return out;
 }
 
+// When each pane's agent last started or ended a turn, and in which
+// workspace and folder: kept after the pane closes or its agent restarts,
+// for the worktree idle clock. Newest last; the oldest go past the cap.
+const TURN_LEDGER_MAX = 500;
+const turnLedger = new Map<string, { at: number; workspaceId: string; cwd: string | null }>();
+
+function noteTurnAt(w: PaneWatcher, at: number): void {
+  // Replayed output is history, not a turn now.
+  if (w.excluded || !w.runtime || w.replayingTail) return;
+  let cwd: string | null = null;
+  try {
+    cwd = pty.sessionCwd(w.paneId);
+  } catch {
+    cwd = null;
+  }
+  const before = turnLedger.get(w.paneId);
+  turnLedger.delete(w.paneId);
+  // A pane that moved on keeps the folder it last worked in.
+  turnLedger.set(w.paneId, { at: Math.max(at, before?.at ?? 0), workspaceId: w.workspaceId, cwd: cwd ?? before?.cwd ?? null });
+  while (turnLedger.size > TURN_LEDGER_MAX) turnLedger.delete(turnLedger.keys().next().value as string);
+}
+
 /**
- * When an agent in a pane `include` takes last had a turn: now while one
- * runs, else when its last turn started or ended; null when none did since
- * Codara started.
+ * When an agent `include` takes (by its workspace and folder) last had a
+ * turn: now while one runs, else when its last turn started or ended, also
+ * for a pane closed since; null when none did since Codara started.
  */
-export function terminalAgentLastTurnAt(include: (paneId: string, workspaceId: string) => boolean, now = Date.now()): number | null {
+export function terminalAgentLastTurnAt(include: (workspaceId: string, cwd: string | null) => boolean, now = Date.now()): number | null {
   let latest: number | null = null;
-  for (const w of watchers.values()) {
-    if (w.excluded || w.disposing || !w.runtime || !include(w.paneId, w.workspaceId)) continue;
-    const at = w.turn ? now : Math.max(w.lastTurnEnd?.at ?? 0, w.lastTurnStartedAt || 0);
+  const seen = (at: number) => {
     if (at > 0 && (latest === null || at > latest)) latest = at;
+  };
+  for (const entry of turnLedger.values()) if (include(entry.workspaceId, entry.cwd)) seen(entry.at);
+  for (const w of watchers.values()) {
+    if (w.excluded || w.disposing || !w.runtime || !turnActive(w)) continue;
+    let cwd: string | null = null;
+    try {
+      cwd = pty.sessionCwd(w.paneId);
+    } catch {
+      cwd = null;
+    }
+    if (include(w.workspaceId, cwd)) seen(now);
   }
   return latest;
+}
+
+// Tests only: forget every recorded turn.
+export function __resetTurnLedgerForTests(): void {
+  turnLedger.clear();
 }
 
 // What codara_session_status reads of one pane; null when no watcher holds it.
