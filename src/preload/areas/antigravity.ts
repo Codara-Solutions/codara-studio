@@ -17,6 +17,11 @@ export const antigravityApi = {
 
   releaseContinue: (paneId: string): Promise<void> => ipcRenderer.invoke("antigravity:release-continue", paneId),
   runsInPane: (paneId: string): Promise<boolean> => ipcRenderer.invoke("antigravity:runs-in-pane", paneId),
+  /** The one conversation the agy process in this pane has open; null when that cannot be shown. */
+  paneConversation: (paneId: string): Promise<string | null> => ipcRenderer.invoke("antigravity:pane-conversation", paneId),
+  /** Whether some agy has this conversation open or agy marks it working; null when unknown. */
+  conversationHeld: (conversationId: string): Promise<boolean | "missing" | null> =>
+    ipcRenderer.invoke("antigravity:conversation-held", conversationId),
   /** The conversations a running agy works in now (agy marks them not fully idle). */
   liveConversations: (): Promise<string[]> => ipcRenderer.invoke("antigravity:live-conversations"),
 };

@@ -135,3 +135,45 @@ export function antigravityConversationsNamed(
   }
   return [...ids];
 }
+
+/**
+ * The pointer an Antigravity pane goes to sleep with: the one conversation
+ * its agy holds open, which waking reopens with `agy --conversation <id>`.
+ * A pane typed as `agy` or `agy --continue` names no id yet, and one whose
+ * agy moved to another conversation names a stale one: both take the open
+ * one, which only this pane's agy can hold. `skip` when it cannot be shown,
+ * or when another pane names it: two agy processes must never share one.
+ */
+export function antigravitySleepPointer(
+  session: TerminalAgentSession,
+  open: string | null,
+  namedElsewhere: readonly string[],
+): { session: TerminalAgentSession } | { skip: string } {
+  if (!open || !isSafeSessionId(open) || open === ANTIGRAVITY_CONTINUE_SESSION_ID) {
+    return { skip: "agy's open conversation unknown" };
+  }
+  if (namedElsewhere.includes(open)) return { skip: "another pane names this conversation" };
+  return { session: session.sessionId === open ? session : { ...session, sessionId: open } };
+}
+
+/**
+ * Why a sleeping Antigravity pane must not run `agy --conversation <id>`
+ * now, in the words its card shows; null when it may. `held`: some agy has
+ * the conversation open or agy marks it working (null: unknown).
+ */
+export function antigravityWakeRefusal(
+  sessionId: string | null | undefined,
+  namedElsewhere: readonly string[],
+  held: boolean | "missing" | null,
+): string | null {
+  if (!sessionId || !isSafeSessionId(sessionId) || sessionId === ANTIGRAVITY_CONTINUE_SESSION_ID) {
+    return "Codara does not know which Antigravity conversation this tab had. Close the tab and reopen the conversation from + > Antigravity worker.";
+  }
+  if (namedElsewhere.includes(sessionId)) return "Another tab has this Antigravity conversation. Close that tab, then try again.";
+  if (held === true) return "Antigravity has this conversation open in another terminal. Close it there, then try again.";
+  if (held === "missing") {
+    return "Antigravity no longer lists this conversation, so Codara cannot reopen it. Close the tab and start a new one.";
+  }
+  if (held === null) return "Codara could not check whether Antigravity has this conversation open elsewhere. Try again.";
+  return null;
+}

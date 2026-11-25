@@ -211,6 +211,9 @@ interface Props {
   // pane), optionally pinning it awake; or that resume failed.
   onPaneResumeRequest?: (tabId: TabId, paneId: string, keepRunning: boolean) => void;
   onPaneWakeFailed?: (tabId: TabId, paneId: string, message: string) => void;
+  // A pane's session pointer wherever its workspace is now (Sleep now's
+  // Antigravity pointer, which must land even if the user switched away).
+  onPaneSessionAdopt?: (paneId: string, session: TerminalAgentSession) => void;
   // Run-owned worker terminals are an observation surface by default. This
   // returns to the owning run canvas without tearing down the xterm or its PTY.
   onBackToRuns: () => void;
@@ -241,6 +244,7 @@ type Bundle = {
   onWoke: () => void;
   onAsleep: (hibernation: TerminalLeafHibernation) => void;
   onSleepAnswer: (hibernation: TerminalLeafHibernation) => void;
+  onSessionAdopt: (session: TerminalAgentSession) => void;
   onKeepAwake: (keepAwake: boolean) => void;
   onResumeRequest: () => void;
   onResumeKeepRunning: () => void;
@@ -289,6 +293,7 @@ function TerminalStack({
   onPaneKeepAwake,
   onPaneResumeRequest,
   onPaneWakeFailed,
+  onPaneSessionAdopt,
   onBackToRuns,
 }: Props) {
   // Memoize the filtered list so it keeps a stable identity when an
@@ -335,6 +340,8 @@ function TerminalStack({
   resumeRequestRef.current = onPaneResumeRequest;
   const wakeFailedRef = useRef(onPaneWakeFailed);
   wakeFailedRef.current = onPaneWakeFailed;
+  const sessionAdoptRef = useRef(onPaneSessionAdopt);
+  sessionAdoptRef.current = onPaneSessionAdopt;
   const lastTouchReportRef = useRef(new Map<string, number>());
   useEffect(() => {
     detectedRef.current = onDetectedUrl;
@@ -479,6 +486,7 @@ function TerminalStack({
           onWoke: () => wokeRef.current?.(tabId, paneId),
           onAsleep: (hibernation) => asleepRef.current?.(tabId, paneId, hibernation),
           onSleepAnswer: (hibernation) => asleepRef.current?.(tabId, paneId, hibernation, true),
+          onSessionAdopt: (session) => sessionAdoptRef.current?.(paneId, session),
           onKeepAwake: (keepAwake) => keepAwakeRef.current?.(tabId, paneId, keepAwake),
           onResumeRequest: () => resumeRequestRef.current?.(tabId, paneId, false),
           onResumeKeepRunning: () => resumeRequestRef.current?.(tabId, paneId, true),
@@ -2432,7 +2440,13 @@ function sleepNowFor(leaf: TerminalLeaf, bundle: Bundle): PaneToolbarProps["slee
   const runtime = session.runtime;
   return {
     onSleep: async () => {
-      const outcome = await requestAgentSleep({ paneId: leaf.paneId, session, placement: "visible", manual: true });
+      const outcome = await requestAgentSleep({
+        paneId: leaf.paneId,
+        session,
+        placement: "visible",
+        manual: true,
+        adoptSession: bundle.onSessionAdopt,
+      });
       if (!outcome) return sleepNowRefusalMessage("stop-failed", runtime);
       if (outcome.ok) {
         bundle.onSleepAnswer(outcome.hibernation);

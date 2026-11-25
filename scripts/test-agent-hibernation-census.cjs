@@ -190,6 +190,67 @@ async function main() {
   check("grok binary", commandRunsAgent("/home/u/.grok/downloads/grok-1.2.3 --resume x", "grok"));
   check("an MCP server is not codex", commandRunsAgent("node /srv/mcp/index.js", "codex") === false);
 
+  // ── Antigravity: `agy` is one native binary, recognised by its exact name ──
+  check("the agy binary is antigravity", commandRunsAgent("/home/u/.local/bin/agy --continue", "antigravity"));
+  check("a bare agy is antigravity", commandRunsAgent("agy", "antigravity"));
+  check("agy.exe is antigravity", commandRunsAgent("\"C:\\Users\\u\\AppData\\Local\\agy\\agy.exe\" --conversation c1", "antigravity"));
+  for (const [name, command] of [
+    ["the shell that typed it", "/usr/bin/zsh -f -ic agy; exec zsh -i"],
+    ["a bash -c wrapper", "bash -c agy --continue"],
+    ["a script named like it", "node /home/u/tools/agy.js"],
+    ["a script under python", "python3 /home/u/bin/agy"],
+    ["a program with agy in its name", "/usr/bin/agy-helper"],
+    ["a program that only mentions it", "grep agy notes.txt"],
+  ]) {
+    check(`${name} is not antigravity`, commandRunsAgent(command, "antigravity") === false, command);
+  }
+  check("agy is not claude", commandRunsAgent("/home/u/.local/bin/agy", "claude") === false);
+  const agyShell = proc(700, 1, -2_000, "/usr/bin/zsh -f -ic agy --continue; exec zsh -i");
+  const agy = proc(701, 700, 0, "/home/u/.local/bin/agy --continue");
+  const agyMcp = proc(702, 701, 1_000, "node /home/u/.local/bin/codara-mcp.cjs");
+  verdict = classifyPaneProcessTree([agyShell, agy, agyMcp], 700, "antigravity");
+  check("agy with the MCP servers it started at boot may sleep", verdict.ok === true && verdict.agentPid === 701, verdict);
+  verdict = classifyPaneProcessTree([agyShell, agy, agyMcp, proc(703, 701, 10 * 60_000, "bash -c npm test")], 700, "antigravity");
+  check("a command agy ran after boot keeps the pane awake", !verdict.ok && verdict.reason === "other-processes", verdict);
+  verdict = classifyPaneProcessTree([agyShell, agy, agyMcp, proc(705, 701, 500, "/home/u/.local/bin/agy -r other")], 700, "antigravity");
+  check(
+    "a second agy under the first, even at boot, keeps the pane awake",
+    !verdict.ok && verdict.reason === "other-processes" && /second agy/.test(verdict.detail ?? ""),
+    verdict,
+  );
+  verdict = classifyPaneProcessTree([agyShell, agy, agyMcp, proc(706, 701, 500, "/opt/Agent Tools/agy --continue")], 700, "antigravity");
+  check("a second agy under a path with spaces keeps the pane awake", !verdict.ok && verdict.reason === "other-processes", verdict);
+  verdict = classifyPaneProcessTree(
+    [proc(700, 1, -2_000, "/home/u/.local/bin/agy"), proc(707, 700, 0, "/home/u/.local/bin/agy -r other")],
+    700,
+    "antigravity",
+  );
+  check("an agy that replaced the pane's shell keeps the pane awake", !verdict.ok && verdict.reason === "other-processes", verdict);
+  verdict = classifyPaneProcessTree(
+    [proc(700, 1, -2_000, "/opt/Agent Tools/agy"), proc(708, 700, 0, "/home/u/.local/bin/agy")],
+    700,
+    "antigravity",
+  );
+  check("an agy under a path with spaces as the pane's process keeps it awake", !verdict.ok && verdict.reason === "other-processes", verdict);
+  verdict = classifyPaneProcessTree(
+    [agyShell, proc(709, 700, -1_000, "/opt/Agent Tools/agy --continue"), proc(710, 709, 0, "/home/u/.local/bin/agy")],
+    700,
+    "antigravity",
+  );
+  check("an agy under a path with spaces in the launcher chain keeps it awake", !verdict.ok && verdict.reason === "other-processes", verdict);
+  verdict = classifyPaneProcessTree([proc(700, 1, -2_000, "/opt/bash tools/agy"), proc(713, 700, 0, "/home/u/.local/bin/agy")], 700, "antigravity");
+  check("an agy under a folder named like a shell, as the pane's process, keeps it awake", !verdict.ok && verdict.reason === "other-processes", verdict);
+  verdict = classifyPaneProcessTree(
+    [agyShell, proc(714, 700, -1_000, "/opt/bash tools/agy --continue"), proc(715, 714, 0, "/home/u/.local/bin/agy")],
+    700,
+    "antigravity",
+  );
+  check("an agy under a folder named like a shell, in the launcher chain, keeps it awake", !verdict.ok && verdict.reason === "other-processes", verdict);
+  verdict = classifyPaneProcessTree([agyShell, proc(711, 700, -1_000, "bash -c agy --continue"), proc(712, 711, 0, "/home/u/.local/bin/agy")], 700, "antigravity");
+  check("a shell in the launcher chain that names agy is fine", verdict.ok === true && verdict.agentPid === 712, verdict);
+  verdict = classifyPaneProcessTree([agyShell, proc(704, 700, 0, "node /home/u/tools/agy.js")], 700, "antigravity");
+  check("a pane running only something named like agy has no agent", !verdict.ok && verdict.reason === "no-agent-process", verdict);
+
   check("legacy PowerShell date", parseWindowsCreationDate("/Date(1760000000000)/") === 1760000000000);
   check("ISO date", parseWindowsCreationDate("2026-10-15T10:00:00.000+02:00") === Date.parse("2026-10-15T08:00:00.000Z"));
   check("missing date is unknown", parseWindowsCreationDate(undefined) === null && parseWindowsCreationDate("") === null);

@@ -3,10 +3,14 @@
 // now. First it makes sure the session can come back: the pointer is healed
 // from the SessionStart trail and probed, and only a session that resumes as
 // it is may sleep. Main then re-checks everything it can see itself.
+// An Antigravity pane sleeps with the conversation its agy holds open
+// (antigravitySleepPointer), which its leaf takes first.
 
 import { isAgentHibernationRuntime, type AgentHibernationPlacement, type AgentHibernationRefusal } from "@shared/agent-hibernation";
 import { decideResume, mergeSessionStart, type ResumeProbe } from "../components/Terminal/resume-policy";
 import type { TerminalAgentSession, TerminalLeafHibernation } from "../tabs/types";
+import { antigravityConversationsNamedElsewhere } from "../workers/antigravity-panes";
+import { antigravitySleepPointer } from "../workers/session-resume";
 
 export type AgentSleepOutcome =
   | { ok: true; hibernation: TerminalLeafHibernation }
@@ -21,6 +25,10 @@ export async function requestAgentSleep(input: {
   // Checked between the slow steps: false drops the request (the timer's
   // pane got the keyboard meanwhile).
   stillWanted?: () => boolean;
+  // Antigravity: once main accepts the sleep, the leaf takes the
+  // conversation its agy held open, so a restart reopens that conversation
+  // and never agy's latest. Required whenever the pointer would change.
+  adoptSession?: (session: TerminalAgentSession) => void;
 }): Promise<AgentSleepOutcome | null> {
   const api = window.spark.agentHibernation;
   const runtime = input.session.runtime;
@@ -28,9 +36,15 @@ export async function requestAgentSleep(input: {
   // The pointer can lag an in-TUI /resume or /clear made while the pane was
   // out of view; the hook trail in main has the exact id.
   const start = await window.spark.agentSession.latestStart?.(input.paneId).catch(() => null);
-  const session = mergeSessionStart(input.session, start ?? null) ?? input.session;
+  let session = mergeSessionStart(input.session, start ?? null) ?? input.session;
   if (!isAgentHibernationRuntime(session.runtime) || session.active === false) {
     return { ok: false, reason: "cannot-resume", skip: "pointer inactive", runtime: session.runtime };
+  }
+  if (session.runtime === "antigravity") {
+    const open = (await window.spark.antigravity?.paneConversation(input.paneId).catch(() => null)) ?? null;
+    const pointer = antigravitySleepPointer(session, open, antigravityConversationsNamedElsewhere(input.paneId));
+    if ("skip" in pointer) return { ok: false, reason: "conversation-unknown", skip: pointer.skip, runtime: session.runtime };
+    session = pointer.session;
   }
   if (input.stillWanted && !input.stillWanted()) return null;
   const probe = (await window.spark.agentSession
@@ -52,6 +66,10 @@ export async function requestAgentSleep(input: {
     return { ok: false, reason: "cannot-resume", skip: `resume plan ${plan}`, runtime: session.runtime };
   }
   if (input.stillWanted && !input.stillWanted()) return null;
+  const adopt = session.runtime === "antigravity" && session.sessionId !== input.session.sessionId;
+  if (adopt && !input.adoptSession) {
+    return { ok: false, reason: "conversation-unknown", skip: "pointer cannot be kept", runtime: session.runtime };
+  }
   const result = await api
     .hibernate({
       paneId: input.paneId,
@@ -60,10 +78,18 @@ export async function requestAgentSleep(input: {
       ...(input.manual ? { manual: true } : {}),
       transcriptPath: probe.transcriptPath ?? session.transcriptPath ?? undefined,
       session: { ...session },
+      ...(session.runtime === "antigravity" ? { conversationId: session.sessionId } : {}),
     })
     .catch(() => null);
   if (!result) return { ok: false, reason: "stop-failed", runtime: session.runtime };
   if (!result.ok) return { ok: false, reason: result.reason, runtime: session.runtime };
+  // Only a sleep main accepted changes the pane's pointer, and to the
+  // conversation main proved (its answer may be another request's, the
+  // timer's): a refused one leaves the live pane's restore pointer as it
+  // was. A Resume pressed before this lands wakes from the id main kept.
+  if (session.runtime === "antigravity" && result.conversationId && result.conversationId !== input.session.sessionId) {
+    input.adoptSession?.({ ...session, sessionId: result.conversationId });
+  }
   return {
     ok: true,
     hibernation: {

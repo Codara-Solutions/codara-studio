@@ -4,7 +4,7 @@
 // read: not raw_summary, not its full-text table, not the per-conversation
 // databases, and never its sign-in or settings. agy itself is never run.
 
-import { existsSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -219,6 +219,120 @@ export function readLiveAntigravityConversations(
       .all(MAX_CONVERSATIONS)
       .map((row) => row.conversation_id)
       .filter((id): id is string => isSafeSessionId(id) && id !== CONTINUE_WORD);
+  } finally {
+    db.close();
+  }
+}
+
+export interface AntigravityConversationActivity {
+  /** The id is a top-level conversation in agy's list. */
+  known: boolean;
+  /** It, or a subagent conversation under it, is marked not fully idle by agy. */
+  busy: "conversation" | "subagent" | null;
+}
+
+/** SQLite's header says the file is in WAL mode (read and write versions 2). */
+function walModeFile(dbPath: string): boolean {
+  const fd = openSync(dbPath, "r");
+  try {
+    const header = Buffer.alloc(20);
+    if (readSync(fd, header, 0, 20, 0) < 20) throw new Error("not a SQLite file");
+    return header[18] === 2 || header[19] === 2;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Opens agy's database for a read that must see its newest rows, the busy
+ * flag hibernation trusts. openSummaryDatabase's immutable read is fine for
+ * listing, not here: it skips a write-ahead log, so with a log but no index
+ * (agy in exclusive locking mode) a flag set a moment ago would read as the
+ * old one. That case throws. Without a log nothing is pending outside the
+ * file: a WAL-mode file is read as immutable (only a checkpoint, which needs
+ * the log, changes it), any other under SQLite's own locks.
+ */
+export function openCurrentSummaryDatabase(dbPath: string): SummaryDatabase {
+  const DatabaseSync = sqliteDatabase();
+  const log = existsSync(`${dbPath}-wal`);
+  if (log && existsSync(`${dbPath}-shm`)) return new DatabaseSync(dbPath, { readOnly: true });
+  if (log) throw new Error("a write-ahead log without its index");
+  if (walModeFile(dbPath)) return new DatabaseSync(`${pathToFileURL(dbPath).href}?immutable=1`, { readOnly: true });
+  return new DatabaseSync(dbPath, { readOnly: true });
+}
+
+/** agy's not_fully_idle as on (true), off (false), or a value it never wrote (null). */
+function busyFlag(value: unknown): boolean | null {
+  if (value === 1 || value === 1n || value === "1" || value === "true" || value === "TRUE") return true;
+  if (value === 0 || value === 0n || value === "0" || value === "false" || value === "FALSE") return false;
+  return null;
+}
+
+/**
+ * What agy itself says about one conversation and every subagent
+ * conversation under it (parent_conversation_id, followed down). Null when
+ * it cannot be shown: a column this needs is missing, a busy flag holds a
+ * value agy is not known to write, or the walk was cut short. Throws when the file cannot be read, like the readers above.
+ */
+export function readAntigravityConversationActivity(
+  dbPath: string,
+  conversationId: string,
+  openReadOnly?: (path: string) => SummaryDatabase,
+): AntigravityConversationActivity | null {
+  if (openReadOnly) return readActivity(openReadOnly(dbPath), conversationId);
+  // A writer may start, commit and even checkpoint between the opener's look
+  // at the files and the read: the files must be the same after the read,
+  // or the answer could be the old flag.
+  const before = summaryFilesState(dbPath);
+  const activity = readActivity(openCurrentSummaryDatabase(dbPath), conversationId);
+  if (summaryFilesState(dbPath) !== before) throw new Error("agy wrote its conversation list during the read");
+  return activity;
+}
+
+/** The database file and its log and index, as size, change time and inode. */
+function summaryFilesState(dbPath: string): string {
+  return [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]
+    .map((path) => {
+      const stat = statSync(path, { throwIfNoEntry: false, bigint: true });
+      return stat ? `${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}` : "-";
+    })
+    .join("|");
+}
+
+function readActivity(db: SummaryDatabase, conversationId: string): AntigravityConversationActivity | null {
+  try {
+    const present = new Set(db.prepare("PRAGMA table_info(conversation_summaries)").all().map((row) => row.name));
+    if (!["conversation_id", "parent_conversation_id", "nesting_depth", "not_fully_idle"].every((column) => present.has(column))) {
+      return null;
+    }
+    // UNION, not UNION ALL: a parent loop in the table ends the walk.
+    const rows = db
+      .prepare(
+        `WITH RECURSIVE tree(id) AS (
+           SELECT conversation_id FROM conversation_summaries WHERE conversation_id = ?
+           UNION SELECT c.conversation_id FROM conversation_summaries c JOIN tree t ON c.parent_conversation_id = t.id
+         )
+         SELECT s.conversation_id, s.nesting_depth, s.parent_conversation_id, s.not_fully_idle
+         FROM conversation_summaries s JOIN tree ON s.conversation_id = tree.id LIMIT ?`,
+      )
+      .all(conversationId, MAX_CONVERSATIONS);
+    let known = false;
+    let busy: AntigravityConversationActivity["busy"] = null;
+    for (const row of rows) {
+      const flag = busyFlag(row.not_fully_idle);
+      if (flag === null) return null;
+      if (row.conversation_id === conversationId) {
+        // Only an explicit depth 0 is top level: NULL is not (Number(null) is 0).
+        const depth = row.nesting_depth;
+        known ||= (depth === 0 || depth === 0n) && (row.parent_conversation_id === null || row.parent_conversation_id === "");
+        if (flag) busy = "conversation";
+      } else if (flag) {
+        busy ??= "subagent";
+      }
+    }
+    // A walk cut at the limit may have left a busy subagent unread.
+    if (rows.length >= MAX_CONVERSATIONS) return null;
+    return { known, busy };
   } finally {
     db.close();
   }

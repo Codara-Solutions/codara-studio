@@ -3321,7 +3321,7 @@ function SessionsSettings({
             desc={
               hibernationMinutes === 0
                 ? "Agents keep running however long they wait, except in workspaces with their own time below."
-                : `A finished agent you are not typing in stops after ${formatIdleMinutes(hibernationMinutes)} to free its memory. Press Resume in its pane to bring it back. Agents waiting for you, pinned with Keep running, or sharing a pane with another program stay awake.`
+                : `A finished terminal agent (Claude Code, Codex, Grok, Pi, Antigravity) you are not typing in stops after ${formatIdleMinutes(hibernationMinutes)} to free its memory. Press Resume in its pane to bring it back. Agents waiting for you, pinned with Keep running, or sharing a pane with another program stay awake.`
             }
             control={
               <span style={{ display: "inline-flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>

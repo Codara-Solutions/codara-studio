@@ -7,7 +7,7 @@
 // owns the active id. Mounting is the contract that keeps editor cursors,
 // terminal PTYs, and dev-server iframes alive across tab switches.
 
-import type { AgentSleepSummary } from "@shared/agent-hibernation";
+import type { AgentHibernationRuntime, AgentSleepSummary } from "@shared/agent-hibernation";
 import type { TerminalAgentOwner } from "@shared/agent-terminal-owner";
 import type {
   FsEntry,
@@ -68,7 +68,7 @@ export interface EditorTab extends BaseTab {
 
 // A sleeping agent pane (see TerminalLeaf.hibernation).
 export interface TerminalLeafHibernation {
-  runtime: "claude" | "codex" | "grok" | "pi";
+  runtime: AgentHibernationRuntime;
   sleptAt: number;
   // The card's line about the session, when main found one.
   summary?: AgentSleepSummary | null;
@@ -84,7 +84,7 @@ export interface TerminalLeafHibernation {
 // What a pane asleep at quit keeps on disk so it comes back asleep, with its
 // card, instead of relaunching its agent (see TerminalLeaf.restoreAsleep).
 export interface TerminalLeafRestoreAsleep {
-  runtime: "claude" | "codex" | "grok" | "pi";
+  runtime: AgentHibernationRuntime;
   sleptAt: number;
   summary?: AgentSleepSummary | null;
 }

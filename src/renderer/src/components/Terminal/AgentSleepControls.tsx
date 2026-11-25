@@ -12,6 +12,7 @@ const RUNTIME_LABEL: Record<TerminalLeafHibernation["runtime"], string> = {
   codex: "CODEX",
   grok: "GROK",
   pi: "PI",
+  antigravity: "ANTIGRAVITY",
 };
 
 export function MoonIcon({ size = 12 }: { size?: number }) {

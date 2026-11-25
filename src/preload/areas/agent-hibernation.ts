@@ -10,6 +10,7 @@ import type {
   AgentHibernationResult,
   AgentRestoredAsleepPane,
   AgentSleepingPane,
+  AgentSleepingSession,
 } from "@shared/agent-hibernation";
 
 export const agentHibernationApi = {
@@ -25,6 +26,9 @@ export const agentHibernationApi = {
    */
   sleepingPane: (paneId: string, options: { freshView: boolean }): Promise<AgentSleepingPane | null> =>
     ipcRenderer.invoke("agentHibernation:sleepingPane", paneId, options),
+  /** The session pointer main kept for a sleeping pane, unread by main; null when none. */
+  sleepingSession: (paneId: string): Promise<AgentSleepingSession | null> =>
+    ipcRenderer.invoke("agentHibernation:sleepingSession", paneId),
   /** A pane restored asleep at launch: main records it as sleeping. */
   restoredAsleep: (pane: AgentRestoredAsleepPane): Promise<boolean> =>
     ipcRenderer.invoke("agentHibernation:restoredAsleep", pane),

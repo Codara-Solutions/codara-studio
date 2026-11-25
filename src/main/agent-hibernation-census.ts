@@ -16,7 +16,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { runtimeFromProcessCommand } from "@shared/agent-patterns";
-import type { AgentHibernationRuntime } from "@shared/agent-hibernation";
+import { MAYBE_AGY_RE, type AgentHibernationRuntime } from "@shared/agent-hibernation";
 import { commandRunsCodaraMcpServer } from "@shared/codara-mcp-server";
 import { commandRunsNativeCli } from "./orchestration/native-cli-process-shutdown";
 import { listProcessesWithCommands, processStartMs, readProcFile } from "./owned-process-tree";
@@ -69,7 +69,9 @@ const LOGIN_COMMAND_SHELL_RE = /^\s*\S*(?:zsh|bash|sh|dash|ksh|fish)(?:\.exe)?\s
 // from the `cmd /c npx …` an MCP server is started with, which must not count.
 const WINDOWS_POWERSHELL_TOOL_RE = /chcp(?:\.com)?"?\s+65001\b[\s\S]*\b(?:pwsh|powershell)(?:\.exe)?\b/i;
 // npm-installed CLIs on Windows run as `node …\@scope\pkg\cli.js`.
-const PACKAGE_PATHS: Record<AgentHibernationRuntime, RegExp> = {
+// Antigravity's `agy` is one native binary with no npm package: only its
+// exact name counts (runtimeFromProcessCommand).
+const PACKAGE_PATHS: Record<Exclude<AgentHibernationRuntime, "antigravity">, RegExp> = {
   claude: /[\\/]@anthropic-ai[\\/]claude-code[\\/]/i,
   codex: /[\\/]@openai[\\/]codex[\\/]/i,
   grok: /[\\/]@xai-official[\\/]grok[\\/]/i,
@@ -100,10 +102,25 @@ export function commandRunsAgent(command: string, runtime: AgentHibernationRunti
   const normalized = normalizeCommandForMatch(command);
   if (!normalized) return false;
   if (SHELL_NAME_RE.test(executableName(command))) return false;
+  // agy is a native binary: the process itself is named agy. A script that
+  // only carries the name (`node tools/agy.js`) is some other program.
+  if (runtime === "antigravity") return executableName(command).replace(/\.exe$/, "") === "agy";
   if (runtimeFromProcessCommand(normalized) === runtime) return true;
   if (runtime !== "pi" && commandRunsNativeCli(runtime, normalized)) return true;
   const name = executableName(command).replace(/\.exe$/, "");
   return (name === "node" || name === "bun") && PACKAGE_PATHS[runtime].test(normalized);
+}
+
+// A path ending in agy (`/opt/bash tools/agy`): agy itself, whatever the
+// flattened listing's first word looks like.
+const AGY_PATH_RE = /[\\/]agy(?:\.exe)?(?=\s|$)/i;
+
+/**
+ * A process that may be agy itself: a path to agy, or an agy word in
+ * anything but a shell that typed it (`zsh -ic agy`).
+ */
+function mayBeAgy(command: string): boolean {
+  return AGY_PATH_RE.test(command) || (MAYBE_AGY_RE.test(command) && !isShellProcess(command));
 }
 
 function isHelperProcess(command: string): boolean {
@@ -164,6 +181,12 @@ export function classifyPaneProcessTree(
   if (!byPid.has(rootPid)) {
     return { ok: false, reason: "process-list-unavailable", detail: "pane shell not listed" };
   }
+  // An agy that replaced the pane's shell (`exec agy`) is not the one the
+  // proof would read: the search below starts under the root. A shell that
+  // only typed it (`zsh -ic agy`) is fine.
+  if (runtime === "antigravity" && mayBeAgy(byPid.get(rootPid)!.command)) {
+    return { ok: false, reason: "other-processes", detail: "agy is the pane's own process" };
+  }
 
   // Breadth-first so the shallowest agent process wins: an agent's own MCP
   // servers can carry agent-looking names, the agent itself never sits below
@@ -214,7 +237,15 @@ export function classifyPaneProcessTree(
 
   const agentStart = agent.startMs;
   for (const entry of tree) {
-    if (entry.pid === agent.pid || chain.has(entry.pid)) continue;
+    if (entry.pid === agent.pid) continue;
+    // Antigravity's proof (antigravity-presence.ts) is read off one agy
+    // process: a second one would be stopped unchecked, whenever it started.
+    // MAYBE_AGY_RE: unquoted spaces in its path too; a false match only keeps
+    // a pane awake. In the launcher chain, the shells that typed it may name it.
+    if (runtime === "antigravity" && (chain.has(entry.pid) ? mayBeAgy(entry.command) : MAYBE_AGY_RE.test(entry.command))) {
+      return { ok: false, reason: "other-processes", detail: `second agy ${describeProcess(entry, agentStart)}` };
+    }
+    if (chain.has(entry.pid)) continue;
     if (underAgent.has(entry.pid)) {
       if (isToolShell(entry.command)) {
         return { ok: false, reason: "other-processes", detail: `tool shell ${describeProcess(entry, agentStart)}` };
