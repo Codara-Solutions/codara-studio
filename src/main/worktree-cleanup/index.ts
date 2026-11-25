@@ -7,7 +7,7 @@
 import { app, BrowserWindow } from "electron";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import type {
   WorktreeCleanupRemoveRequest,
   WorktreeCleanupScan,
@@ -21,6 +21,7 @@ import type {
 } from "@shared/worktree-cleanup-agent";
 import { createWorktreeAuditLog, scanProcessesUnderCwds, type RendererTerminal, type WorktreeCaller } from "../agent-worktrees";
 import { paneIdleMs } from "../agent-hibernation";
+import { terminalAgentLastTurnAt } from "../terminal-agent-notify";
 import { codaraHome } from "../codara-home";
 import { E2E_BACKGROUND } from "../e2e-background";
 import type { IpcHandle } from "../ipc";
@@ -114,6 +115,11 @@ function deps(invalidateGitCache: (cwd: string) => void): WorktreeCleanupDeps {
     now: () => new Date(),
     agentSessionName,
     paneIdleMs: (paneId) => paneIdleMs(paneId),
+    lastAgentTurnAt: (workspaceIds, dirs) => {
+      const ids = new Set(workspaceIds);
+      const inside = (cwd: string | null) => !!cwd && dirs.some((dir) => cwd === dir || cwd.startsWith(dir.endsWith(sep) ? dir : `${dir}${sep}`));
+      return terminalAgentLastTurnAt((paneId, workspaceId) => ids.has(workspaceId) || inside(pty.sessionCwd(paneId)));
+    },
     archiveRoot: () => worktreeArchiveRoot(codaraHome()),
     leftovers: systemLeftovers({ appPid: process.pid, sessionPids: () => pty.sessionPids() }),
   };

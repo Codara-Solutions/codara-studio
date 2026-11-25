@@ -2768,6 +2768,21 @@ export function terminalAgentActivitySnapshot(): TerminalAgentActivity[] {
   return out;
 }
 
+/**
+ * When an agent in a pane `include` takes last had a turn: now while one
+ * runs, else when its last turn started or ended; null when none did since
+ * Codara started.
+ */
+export function terminalAgentLastTurnAt(include: (paneId: string, workspaceId: string) => boolean, now = Date.now()): number | null {
+  let latest: number | null = null;
+  for (const w of watchers.values()) {
+    if (w.excluded || w.disposing || !w.runtime || !include(w.paneId, w.workspaceId)) continue;
+    const at = w.turn ? now : Math.max(w.lastTurnEnd?.at ?? 0, w.lastTurnStartedAt || 0);
+    if (at > 0 && (latest === null || at > latest)) latest = at;
+  }
+  return latest;
+}
+
 // What codara_session_status reads of one pane; null when no watcher holds it.
 export function terminalAgentSessionLive(paneId: string): AgentSessionLive | null {
   const w = watchers.get(paneId);
