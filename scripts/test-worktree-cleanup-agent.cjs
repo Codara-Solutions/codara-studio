@@ -157,9 +157,10 @@ async function main() {
   const bundles = await Promise.all([
     bundle("src/shared/worktree-cleanup-agent.ts", "shared"),
     bundle("src/main/worktree-cleanup/agent-tool.ts", "tool"),
+    bundle("src/shared/worktree-cleanup-approval.ts", "approval"),
     bundle("src/main/agent-worktrees.ts", "agent"),
   ]);
-  const [shared, tool, agent] = bundles.map((entry) => entry.mod);
+  const [shared, tool, approval, agent] = bundles.map((entry) => entry.mod);
   await pureChecks(shared);
 
   const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "codara-wt-cleanup-agent-")));
@@ -536,6 +537,50 @@ async function main() {
       assert.equal(fs.existsSync(mine), false);
       assert.ok(git(repo, ["branch", "--list", "feature/mine"]), "a branch that is not merged stays");
       h.openPanes.delete("pane-maker");
+    });
+    await check("a worktree whose branch changed between the scan and the full check is blocked and never removed", async () => {
+      h.heads = null;
+      const switcher = add("switcher", "feature/switch-old");
+      commitFile(switcher, "switch.txt", "w\n", "switch work");
+      mergeIntoMain("feature/switch-old");
+      git(repo, ["branch", "feature/switch-new", "feature/switch-old"]);
+      // The size measure runs after the scan and before the full check: the
+      // branch moves there, as another tab could.
+      const measure = deps.measureSizes;
+      deps.measureSizes = async (items) => {
+        if (items.some((entry) => entry.path === switcher)) git(switcher, ["switch", "-q", "feature/switch-new"]);
+        return measure(items);
+      };
+      try {
+        const result = await tool.removeForAgent(
+          deps,
+          { items: [{ path: switcher }, { path: stale }] },
+          context,
+          asker((request) => {
+            const row = request.items.find((entry) => entry.path === switcher);
+            assert.equal(row.blocked, "Its branch changed while this dialog was being prepared. Scan again.");
+            assert.equal(row.branch, "feature/switch-new", "the dialog names the branch the removal would act on");
+            // Neither the dialog's own answer nor a forged one sends it as remove.
+            const ticked = Object.fromEntries(request.items.map((entry) => [`${entry.repoRoot}\u0000${entry.path}`, { remove: true, deleteRemoteBranch: true }]));
+            const fromDialog = approval.approvalAnswerItems(request.items, ticked, true).find((entry) => entry.path === switcher);
+            assert.equal(fromDialog.remove, false);
+            return {
+              id: "w",
+              approved: true,
+              items: request.items.map((entry) => ({ repoRoot: entry.repoRoot, path: entry.path, remove: entry.path === switcher, deleteRemoteBranch: true })),
+              deleteMergedBranches: true,
+            };
+          }),
+        );
+        assert.equal(result.removed.length, 0, JSON.stringify(result.removed));
+        assert.equal(result.blockedBeforeAsking, 1);
+        assert.match(new Map(result.skipped.map((entry) => [entry.path, entry.reason])).get(switcher), /branch changed/);
+        assert.ok(fs.existsSync(switcher));
+        assert.ok(git(repo, ["branch", "--list", "feature/switch-old"]), "the scanned branch stays");
+        assert.ok(git(repo, ["branch", "--list", "feature/switch-new"]), "the checked branch stays");
+      } finally {
+        deps.measureSizes = measure;
+      }
     });
     await check("without a remote, no remote branch is offered", async () => {
       git(repo, ["remote", "remove", "origin"]);

@@ -475,6 +475,11 @@ const BLOCKED_GROUPS: Partial<Record<WorktreeCleanupCode, string>> = {
 function blockedReason(facts: AgentWorktreeFacts): { text: string; group: string } | null {
   const { row, check } = facts;
   if (!check) return { text: "The full check did not finish.", group: "The full check did not finish" };
+  // The dialog names the branch the removal will act on (the full check's);
+  // if the scan saw another one, what the user reads may not be what goes.
+  if (check.branch !== row.branch) {
+    return { text: "Its branch changed while this dialog was being prepared. Scan again.", group: "Changed while the dialog was prepared" };
+  }
   if (row.inUse.length) return { text: `In use: ${row.inUse.map((use) => use.label).join(", ")}.`, group: IN_USE_GROUP };
   if (hasUnsavedChanges({ dirty: row.dirty, localWork: check.localWork, missing: row.missing })) {
     return { text: "It has unsaved changes. Only you can remove it, from Clean up worktrees.", group: "With unsaved changes" };
@@ -494,7 +499,7 @@ function approvalItem(facts: AgentWorktreeFacts, suggestedRemote: boolean): Work
     repoRoot: row.repoRoot,
     repoName: row.repoName,
     path: row.path,
-    branch: row.branch,
+    branch: check ? check.branch : row.branch,
     workspaceName: row.workspace?.name ?? null,
     sizeBytes: sizeBytesOf(facts),
     advice: facts.advice,

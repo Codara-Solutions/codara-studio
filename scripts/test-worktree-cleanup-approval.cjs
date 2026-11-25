@@ -170,16 +170,28 @@ async function main() {
     );
     assert.equal(
       m.tickEffect(item("a", { merged: false, unmergedCommits: 3, pullRequest: null, onRemote: false }), true),
-      "Folder goes. The branch stays on this computer only, with its 3 commits that are not merged.",
+      "Folder goes. The branch stays here, with its 3 commits that are not merged. It is not on origin.",
     );
     assert.equal(
       m.tickEffect(item("a", { merged: false, unmergedCommits: 1, pullRequest: null, onRemote: null }), true),
       "Folder goes. The branch stays, with its 1 commit that is not merged.",
     );
-    assert.equal(m.tickEffect(item("a", { branch: null, merged: false, unmergedCommits: 1 }), true), "Folder goes. Its 1 commit stays recoverable for 30 days.");
+    assert.equal(
+      m.tickEffect(item("a", { branch: null, merged: false, unmergedCommits: 1 }), true),
+      "Folder goes. No branch holds it: its 1 commit that is not merged is kept only by a recovery ref, for 30 days.",
+    );
+    // A detached worktree whose folder is gone and whose base was not
+    // recognised (so no commit count): it still says the 30 days, and never reads safe.
+    const detachedGone = item("a", { branch: null, missing: true, merged: false, unmergedCommits: 0, advice: "safe", pullRequest: null });
+    assert.equal(
+      m.tickEffect(detachedGone, true),
+      "The folder is already gone; git's record of it goes. No branch holds it: its last commit is kept only by a recovery ref, for 30 days.",
+    );
+    assert.equal(m.approvalBadge(detachedGone), "check");
+    assert.equal(m.approvalBadge(item("a")), "safe");
     // A folder already gone still takes its merged branch with it.
     assert.equal(m.tickEffect(item("a", { missing: true }), true), "Merged. The folder is already gone; git's record of it and the local branch go. The branch on origin stays.");
-    assert.equal(m.tickEffect(item("a", { missing: true, branch: null, merged: false }), true), "The folder is already gone; git's record of it goes.");
+    assert.match(m.tickEffect(item("a", { missing: true, branch: null, merged: false }), true), /^The folder is already gone; git's record of it goes\. No branch holds it/);
     // The remote wording follows the row's own tick.
     const offeredRemote = { offered: true, reason: "Pull request #12 merged it.", name: "origin", suggested: false };
     assert.equal(
@@ -235,6 +247,8 @@ async function main() {
                         if (remoteGoes) assert.ok(!text.includes(`on ${name ?? "the remote"} stays`), label);
                         assert.equal(/git's record of it/.test(text), missing, label);
                         assert.ok(!/GitHub/.test(text), `the remote is named as the checkbox names it: ${label}`);
+                        assert.equal(/kept only by a recovery ref, for 30 days/.test(text), !branch, label);
+                        assert.ok(!/this computer only/.test(text), `only the remote that was checked is named: ${label}`);
                         combos += 1;
                       }
     assert.ok(combos > 1000);

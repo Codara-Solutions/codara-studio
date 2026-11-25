@@ -20,8 +20,9 @@ export const APPROVAL_BADGE_LABELS: Record<ApprovalBadge, string> = {
   check: "Check first",
 };
 
-export function approvalBadge(item: Pick<WorktreeCleanupApprovalItem, "advice">): ApprovalBadge {
-  return item.advice === "safe" ? "safe" : "check";
+/** A row with no branch is never "safe": only a 30-day recovery ref keeps its last commit. */
+export function approvalBadge(item: Pick<WorktreeCleanupApprovalItem, "advice" | "branch">): ApprovalBadge {
+  return item.advice === "safe" && item.branch !== null ? "safe" : "check";
 }
 
 export interface ApprovalLayout<T> {
@@ -127,7 +128,13 @@ export function tickEffect(item: WorktreeCleanupApprovalItem, deleteMergedBranch
     parts.push("Folder goes.");
   }
   if (!item.branch) {
-    if (commits > 0) parts.push(`Its ${plural(commits, "commit")} ${commits === 1 ? "stays" : "stay"} recoverable for 30 days.`);
+    // Whether the base holds the commit may be unknown (commits is then 0),
+    // so the line never leans on it.
+    parts.push(
+      commits > 0
+        ? `No branch holds it: its ${plural(commits, "commit")} that ${commits === 1 ? "is" : "are"} not merged ${commits === 1 ? "is" : "are"} kept only by a recovery ref, for 30 days.`
+        : "No branch holds it: its last commit is kept only by a recovery ref, for 30 days.",
+    );
     return parts.join(" ");
   }
   const remote = item.remote.name ?? "the remote";
@@ -151,7 +158,7 @@ export function tickEffect(item: WorktreeCleanupApprovalItem, deleteMergedBranch
   else if (onRemote) {
     parts.push(`The branch stays, here and on ${remote}${pr ? `, with pull request #${pr.number}` : ""}.`);
     if (item.remote.offered) parts.push("Tick below to delete it there.");
-  } else if (item.onRemote === false) parts.push(`The branch stays on this computer only${kept}.`);
+  } else if (item.onRemote === false) parts.push(`The branch stays here${kept}. It is not on ${remote}.`);
   else parts.push(`The branch stays${kept}.`);
   return parts.join(" ");
 }
