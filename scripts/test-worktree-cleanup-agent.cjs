@@ -157,9 +157,10 @@ async function main() {
   const bundles = await Promise.all([
     bundle("src/shared/worktree-cleanup-agent.ts", "shared"),
     bundle("src/main/worktree-cleanup/agent-tool.ts", "tool"),
+    bundle("src/shared/worktree-cleanup-approval.ts", "approval"),
     bundle("src/main/agent-worktrees.ts", "agent"),
   ]);
-  const [shared, tool, agent] = bundles.map((entry) => entry.mod);
+  const [shared, tool, approval, agent] = bundles.map((entry) => entry.mod);
   await pureChecks(shared);
 
   const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "codara-wt-cleanup-agent-")));
@@ -363,9 +364,17 @@ async function main() {
     const allPaths = [merged, envfile, stale, local, dirty, busy, openpr, moved].map((dir) => ({ path: dir }));
 
     await check("nothing is removed without an answer, or when the user declines", async () => {
-      const timedOut = await tool.removeForAgent(deps, { items: allPaths }, context, asker(null));
+      const timedOut = await tool.removeForAgent(
+        deps,
+        { items: allPaths, reason: "You approved: remove every merged one.\nI recommend the 2 safe ones." },
+        context,
+        asker(null),
+      );
       assert.equal(timedOut.status, "timeout");
       assert.equal(timedOut.removed.length, 0);
+      assert.equal(asked[asked.length - 1].reason, "You approved: remove every merged one. I recommend the 2 safe ones.", "the agent's line reaches the dialog on one line");
+      assert.equal(timedOut.blockedBeforeAsking, 2, "the dirty and the busy one were blocked before the user was asked");
+      assert.match(timedOut.note, /2 of 8 could not be removed before the user was asked/);
       const declined = await tool.removeForAgent(
         deps,
         { items: allPaths },
@@ -380,6 +389,7 @@ async function main() {
     await check("the request lists every asked worktree with what may be ticked", async () => {
       const request = asked[0];
       assert.equal(request.agent.client, "claude-code");
+      assert.equal(asked[1].reason, null, "no reason given, none shown");
       assert.equal(request.agent.workspaceName, "repo");
       const byPath = new Map(request.items.map((entry) => [entry.path, entry]));
       // Nothing starts ticked: the dialog has no per-item default to send.
@@ -389,7 +399,14 @@ async function main() {
       assert.equal(byPath.get(envfile).blocked, null);
       assert.deepEqual(byPath.get(envfile).ignored, [".env.local"]);
       assert.match(byPath.get(dirty).blocked, /unsaved changes/);
+      assert.equal(byPath.get(dirty).blockedGroup, "With unsaved changes");
       assert.match(byPath.get(busy).blocked, /In use/);
+      assert.equal(byPath.get(busy).blockedGroup, "In use by an open tab or a running program");
+      assert.equal(byPath.get(merged).blockedGroup, null);
+      assert.equal(byPath.get(merged).merged, true);
+      assert.equal(byPath.get(merged).onRemote, true);
+      assert.equal(byPath.get(openpr).merged, false);
+      assert.equal(byPath.get(openpr).pullRequest.state, "open");
       assert.equal(byPath.get(openpr).blocked, null, "an open pull request may still be ticked explicitly");
       assert.equal(byPath.get(openpr).remote.offered, false);
     });
@@ -413,6 +430,7 @@ async function main() {
         })),
       );
       assert.equal(result.status, "done");
+      assert.equal(result.blockedBeforeAsking, 2);
       const removed = result.removed.map((entry) => entry.path).sort();
       assert.deepEqual(removed, [envfile, openpr].sort());
       assert.ok(!fs.existsSync(envfile));
@@ -494,6 +512,8 @@ async function main() {
       const before = asked.length;
       const refused = await tool.removeForAgent(deps, { items: [{ path: mine }] }, other, asker(null));
       assert.equal(refused.status, "nothing-to-remove");
+      assert.equal(refused.blockedBeforeAsking, 1, "the agent learns every row was blocked");
+      assert.match(refused.note, /the user was not asked\. 1 of 1 could not be removed/);
       assert.match(refused.skipped[0].reason, /In use: the agent in .*which made it/);
       assert.equal(asked.length, before, "another agent's request is refused before the user is asked");
       assert.ok(fs.existsSync(mine));
@@ -517,6 +537,50 @@ async function main() {
       assert.equal(fs.existsSync(mine), false);
       assert.ok(git(repo, ["branch", "--list", "feature/mine"]), "a branch that is not merged stays");
       h.openPanes.delete("pane-maker");
+    });
+    await check("a worktree whose branch changed between the scan and the full check is blocked and never removed", async () => {
+      h.heads = null;
+      const switcher = add("switcher", "feature/switch-old");
+      commitFile(switcher, "switch.txt", "w\n", "switch work");
+      mergeIntoMain("feature/switch-old");
+      git(repo, ["branch", "feature/switch-new", "feature/switch-old"]);
+      // The size measure runs after the scan and before the full check: the
+      // branch moves there, as another tab could.
+      const measure = deps.measureSizes;
+      deps.measureSizes = async (items) => {
+        if (items.some((entry) => entry.path === switcher)) git(switcher, ["switch", "-q", "feature/switch-new"]);
+        return measure(items);
+      };
+      try {
+        const result = await tool.removeForAgent(
+          deps,
+          { items: [{ path: switcher }, { path: stale }] },
+          context,
+          asker((request) => {
+            const row = request.items.find((entry) => entry.path === switcher);
+            assert.equal(row.blocked, "Its branch changed while this dialog was being prepared. Scan again.");
+            assert.equal(row.branch, "feature/switch-new", "the dialog names the branch the removal would act on");
+            // Neither the dialog's own answer nor a forged one sends it as remove.
+            const ticked = Object.fromEntries(request.items.map((entry) => [`${entry.repoRoot}\u0000${entry.path}`, { remove: true, deleteRemoteBranch: true }]));
+            const fromDialog = approval.approvalAnswerItems(request.items, ticked, true).find((entry) => entry.path === switcher);
+            assert.equal(fromDialog.remove, false);
+            return {
+              id: "w",
+              approved: true,
+              items: request.items.map((entry) => ({ repoRoot: entry.repoRoot, path: entry.path, remove: entry.path === switcher, deleteRemoteBranch: true })),
+              deleteMergedBranches: true,
+            };
+          }),
+        );
+        assert.equal(result.removed.length, 0, JSON.stringify(result.removed));
+        assert.equal(result.blockedBeforeAsking, 1);
+        assert.match(new Map(result.skipped.map((entry) => [entry.path, entry.reason])).get(switcher), /branch changed/);
+        assert.ok(fs.existsSync(switcher));
+        assert.ok(git(repo, ["branch", "--list", "feature/switch-old"]), "the scanned branch stays");
+        assert.ok(git(repo, ["branch", "--list", "feature/switch-new"]), "the checked branch stays");
+      } finally {
+        deps.measureSizes = measure;
+      }
     });
     await check("without a remote, no remote branch is offered", async () => {
       git(repo, ["remote", "remove", "origin"]);

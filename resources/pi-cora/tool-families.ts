@@ -217,7 +217,8 @@ use and never forces; act on its code and hint, and ask the user rather than
 deleting work yourself. codara_worktree_list shows what is removable.
 To clean up worktrees across every repository, scan with
 codara_worktree_cleanup, explain its recommendations to the user in plain
-words, then call it with action "remove"; the user approves each one in Codara.`,
+words, then call it with action "remove" and a one-line reason (the rule the
+user approved and what you recommend); the user approves each one in Codara.`,
   workflows: `Workflows: a script that runs many agents. Shape:
   export const meta = { name: "kebab-name", description: "...", phases: [{ title: "Find" }], args: {JSON Schema} };
   phase("Find");
