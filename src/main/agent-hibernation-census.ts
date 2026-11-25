@@ -220,6 +220,11 @@ export function classifyPaneProcessTree(
   const agentStart = agent.startMs;
   for (const entry of tree) {
     if (entry.pid === agent.pid || chain.has(entry.pid)) continue;
+    // Antigravity's proof (antigravity-presence.ts) is read off one agy
+    // process: a second one would be stopped unchecked, whenever it started.
+    if (runtime === "antigravity" && commandRunsAgent(entry.command, runtime)) {
+      return { ok: false, reason: "other-processes", detail: `second agy ${describeProcess(entry, agentStart)}` };
+    }
     if (underAgent.has(entry.pid)) {
       if (isToolShell(entry.command)) {
         return { ok: false, reason: "other-processes", detail: `tool shell ${describeProcess(entry, agentStart)}` };

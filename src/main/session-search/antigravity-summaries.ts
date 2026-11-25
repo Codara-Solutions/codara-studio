@@ -4,7 +4,7 @@
 // read: not raw_summary, not its full-text table, not the per-conversation
 // databases, and never its sign-in or settings. agy itself is never run.
 
-import { existsSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -231,16 +231,53 @@ export interface AntigravityConversationActivity {
   busy: "conversation" | "subagent" | null;
 }
 
+/** SQLite's header says the file is in WAL mode (read and write versions 2). */
+function walModeFile(dbPath: string): boolean {
+  const fd = openSync(dbPath, "r");
+  try {
+    const header = Buffer.alloc(20);
+    if (readSync(fd, header, 0, 20, 0) < 20) throw new Error("not a SQLite file");
+    return header[18] === 2 || header[19] === 2;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Opens agy's database for a read that must see its newest rows, the busy
+ * flag hibernation trusts. openSummaryDatabase's immutable read is fine for
+ * listing, not here: it skips a write-ahead log, so with a log but no index
+ * (agy in exclusive locking mode) a flag set a moment ago would read as the
+ * old one. That case throws. Without a log nothing is pending outside the
+ * file: a WAL-mode file is read as immutable (only a checkpoint, which needs
+ * the log, changes it), any other under SQLite's own locks.
+ */
+export function openCurrentSummaryDatabase(dbPath: string): SummaryDatabase {
+  const DatabaseSync = sqliteDatabase();
+  const log = existsSync(`${dbPath}-wal`);
+  if (log && existsSync(`${dbPath}-shm`)) return new DatabaseSync(dbPath, { readOnly: true });
+  if (log) throw new Error("a write-ahead log without its index");
+  if (walModeFile(dbPath)) return new DatabaseSync(`${pathToFileURL(dbPath).href}?immutable=1`, { readOnly: true });
+  return new DatabaseSync(dbPath, { readOnly: true });
+}
+
+/** agy's not_fully_idle as on (true), off (false), or a value it never wrote (null). */
+function busyFlag(value: unknown): boolean | null {
+  if (value === 1 || value === 1n || value === "1" || value === "true" || value === "TRUE") return true;
+  if (value === 0 || value === 0n || value === "0" || value === "false" || value === "FALSE") return false;
+  return null;
+}
+
 /**
  * What agy itself says about one conversation and every subagent
  * conversation under it (parent_conversation_id, followed down). Null when
- * the table lacks a column this needs: then nothing can be shown. Throws
- * when the file cannot be read, like the readers above.
+ * it cannot be shown: a column this needs is missing, a busy flag holds a
+ * value agy is not known to write, or the walk was cut short. Throws when the file cannot be read, like the readers above.
  */
 export function readAntigravityConversationActivity(
   dbPath: string,
   conversationId: string,
-  openReadOnly: (path: string) => SummaryDatabase = openSummaryDatabase,
+  openReadOnly: (path: string) => SummaryDatabase = openCurrentSummaryDatabase,
 ): AntigravityConversationActivity | null {
   const db = openReadOnly(dbPath);
   try {
@@ -259,14 +296,17 @@ export function readAntigravityConversationActivity(
          FROM conversation_summaries s JOIN tree ON s.conversation_id = tree.id LIMIT ?`,
       )
       .all(conversationId, MAX_CONVERSATIONS);
-    const busyFlag = (value: unknown) => value === 1 || value === 1n || value === "true" || value === "TRUE";
     let known = false;
     let busy: AntigravityConversationActivity["busy"] = null;
     for (const row of rows) {
+      const flag = busyFlag(row.not_fully_idle);
+      if (flag === null) return null;
       if (row.conversation_id === conversationId) {
-        known ||= Number(row.nesting_depth) === 0 && (row.parent_conversation_id === null || row.parent_conversation_id === "");
-        if (busyFlag(row.not_fully_idle)) busy = "conversation";
-      } else if (busyFlag(row.not_fully_idle)) {
+        // Only an explicit depth 0 is top level: NULL is not (Number(null) is 0).
+        const depth = row.nesting_depth;
+        known ||= (depth === 0 || depth === 0n) && (row.parent_conversation_id === null || row.parent_conversation_id === "");
+        if (flag) busy = "conversation";
+      } else if (flag) {
         busy ??= "subagent";
       }
     }

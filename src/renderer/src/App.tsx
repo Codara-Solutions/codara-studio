@@ -8941,6 +8941,7 @@ const Workspace = React.memo(function Workspace({
                 onPaneKeepAwake={isActive ? handlePaneKeepAwake : noopTerminalCb}
                 onPaneResumeRequest={handlePaneResumeRequest}
                 onPaneWakeFailed={handlePaneWakeFailed}
+                onPaneSessionAdopt={tabs.setPaneAgentSession}
                 onBackToRuns={isActive ? handleBackToRuns : noopTerminalCb}
               />
             </div>

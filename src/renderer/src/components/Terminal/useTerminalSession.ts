@@ -3425,6 +3425,20 @@ export function useTerminalSession({
             }
           }
           if (session?.runtime === "antigravity") {
+            // The pointer main kept with the sleep is the one its checks
+            // proved; the leaf's can lag it (Sleep now as the user switched
+            // workspaces), and waking another conversation is never right.
+            const kept = (await window.spark.agentHibernation?.sleepingSession?.(sessionId).catch(() => null)) as
+              | Partial<TerminalAgentSession>
+              | null
+              | undefined;
+            if (disposed) return;
+            if (kept?.runtime === "antigravity" && typeof kept.sessionId === "string" && kept.sessionId !== session.sessionId) {
+              logRestore(`pane=${sessionId} wakes with the Antigravity conversation main kept with the sleep`);
+              session = { ...session, sessionId: kept.sessionId };
+              agentSessionRef.current = session;
+              onResumeFallbackRef.current?.(session);
+            }
             // Two agy processes must never write one conversation: one opened
             // it meanwhile (another tab, a terminal outside Codara) keeps the
             // pane asleep, and so does a pointer that names no conversation,

@@ -297,6 +297,17 @@ async function main() {
   r = await agyRun();
   check("an idle agy holding the pane's conversation sleeps", r.result.ok === true && r.calls.stop.length === 1, r.result);
   check("it reads the open conversation off the agy process the census found", r.calls.openPid === 101, r.calls);
+  r = await agyRun(undefined, { session: { runtime: "antigravity", sessionId: "continue", cwd: "/w" } });
+  H.live = new Set();
+  H.placed = new Set(["pane-1"]);
+  const keptAgy = ah.takeSleepingPane("pane-1");
+  H.live = undefined;
+  H.placed = undefined;
+  check(
+    "the sleep keeps the conversation it proved, not the pane's lagging pointer",
+    r.result.ok === true && keptAgy?.session?.sessionId === "conv-1" && keptAgy.session.cwd === "/w",
+    keptAgy,
+  );
   r = await agyRun(undefined, { manual: true });
   check("Sleep now puts an idle agy to sleep too", r.result.ok === true, r.result);
   const agyRefusals = [
@@ -317,6 +328,7 @@ async function main() {
     ["a program beside agy in the pane", (t) => t.state.processes.push({ pid: 104, parentPid: 100, startMs: NOW - 20 * MIN, command: "vim notes" }), {}, "other-processes"],
     ["agy in print mode", (t) => (t.state.processes[1].command = "agy -p summarize"), {}, "other-processes", "agy is not an interactive session"],
     ["agy with a remote connection", (t) => (t.state.processes[1].command = "agy --remote-control"), {}, "other-processes", "agy is not an interactive session"],
+    ["a second agy under the first", (t) => t.state.processes.push({ pid: 105, parentPid: 101, startMs: NOW - 200 * MIN + 1_000, command: "agy -r conv-9" }), {}, "other-processes"],
     ["no way to check agy at all", (t) => delete t.deps.antigravity, {}, "conversation-unknown", "agy could not be checked"],
   ];
   for (const [name, mutate, extra, reason, detail] of agyRefusals) {

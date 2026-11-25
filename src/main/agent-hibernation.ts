@@ -773,7 +773,12 @@ async function decide(
     unsent: kept?.unsent ?? null,
     summary: null,
     freedBytes,
-    session: request.session ?? null,
+    // Antigravity wakes the conversation proved held above, whatever the
+    // renderer's pointer said (useTerminalSession reads it back on wake).
+    session:
+      request.runtime === "antigravity" && request.conversationId
+        ? { ...(request.session ?? {}), runtime: "antigravity", sessionId: request.conversationId }
+        : (request.session ?? null),
     placementGraceUntil: 0,
     offExit: null,
   };
@@ -805,6 +810,9 @@ export function registerAgentHibernationIpc(handle: IpcHandle): void {
       : null,
   );
   handle("agentHibernation:restoredAsleep", (_event, input: unknown) => registerRestoredAsleep(input));
+  handle("agentHibernation:sleepingSession", (_event, paneId: unknown) =>
+    typeof paneId === "string" && paneId.length > 0 && paneId.length <= 256 ? (sleepingEntry(paneId)?.session ?? null) : null,
+  );
 }
 
 /** The renderer's fire-and-forget channels (touches and its own skips). */

@@ -14,7 +14,6 @@ import { readdir, readlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { runtimeFromProcessCommand } from "../shared/agent-patterns";
 import type { AgentHibernationRefusal } from "../shared/agent-hibernation";
 import { isSafeSessionId } from "../shared/session-search";
 import { listProcessesWithCommands } from "./owned-process-tree";
@@ -54,24 +53,43 @@ export function lsofPaths(output: string): string[] {
     .map((line) => line.slice(1));
 }
 
+export interface ProcFs {
+  readdir: (path: string) => Promise<string[]>;
+  readlink: (path: string) => Promise<string>;
+}
+
+const gone = (error: unknown) => (error as NodeJS.ErrnoException | null)?.code === "ENOENT";
+
+/**
+ * Every file a Linux process has open, from /proc/<pid>/fd. Null unless each
+ * descriptor was read and the set did not change meanwhile: one left out
+ * could be a second lock. A process gone since it was listed holds nothing.
+ */
+export async function linuxOpenFilePaths(pid: number, fs: ProcFs = { readdir, readlink }): Promise<string[] | null> {
+  const dir = `/proc/${pid}/fd`;
+  const fds = await fs.readdir(dir).catch((error) => (gone(error) ? null : Promise.reject(error)));
+  if (fds === null) return [];
+  if (fds.length > MAX_FDS) return null;
+  const paths: string[] = [];
+  for (const fd of fds) {
+    const path = await fs.readlink(`${dir}/${fd}`).catch(() => null);
+    if (path === null) {
+      // The process may have exited mid-read; anything else is unknown.
+      const after = await fs.readdir(dir).catch((error) => (gone(error) ? null : undefined));
+      return after === null ? [] : null;
+    }
+    paths.push(path);
+  }
+  const again = await fs.readdir(dir).catch((error) => (gone(error) ? null : undefined));
+  if (again === null) return [];
+  if (again === undefined || again.length !== fds.length || fds.some((fd) => !again.includes(fd))) return null;
+  return paths;
+}
+
 async function openFilePaths(pid: number, platform: NodeJS.Platform): Promise<string[] | null> {
   if (!Number.isSafeInteger(pid) || pid <= 0) return null;
   try {
-    if (platform === "linux") {
-      const fds = await readdir(`/proc/${pid}/fd`).catch((error: NodeJS.ErrnoException) => {
-        // Gone since it was listed: it holds nothing open.
-        if (error?.code === "ENOENT") return [] as string[];
-        throw error;
-      });
-      if (fds.length > MAX_FDS) return null;
-      const paths: string[] = [];
-      for (const fd of fds) {
-        // A descriptor closed since the listing holds nothing.
-        const target = await readlink(`/proc/${pid}/fd/${fd}`).catch(() => null);
-        if (target) paths.push(target);
-      }
-      return paths;
-    }
+    if (platform === "linux") return await linuxOpenFilePaths(pid);
     if (platform === "darwin") {
       const { stdout } = await execFileAsync("lsof", ["-a", "-p", String(pid), "-F", "n", "-w"], {
         encoding: "utf8",
@@ -166,6 +184,12 @@ export async function antigravitySleepVerdict(
   return judgeAntigravitySleep(conversationId, open, isAntigravityConversationId(conversationId) ? read.activity(conversationId) : undefined);
 }
 
+// The listing joins argv with spaces, so `/opt/Agent Tools/agy` has no
+// first token named agy. Any command with an agy path segment is looked at:
+// reading a process that is not agy finds no lock, and missing one would let
+// two agy processes write one conversation.
+export const MAYBE_AGY_RE = /(?:^|[\s/\\])agy(?:\.exe)?(?=\s|$)/i;
+
 /**
  * Before a sleeping pane runs `agy --conversation <id>`: true when some agy
  * on this machine has that conversation open or agy marks it working, so a
@@ -179,7 +203,7 @@ export async function antigravityConversationHeld(conversationId: string): Promi
   const processes = await listProcessesWithCommands(0).catch(() => null);
   if (!processes) return null;
   for (const proc of processes) {
-    if (runtimeFromProcessCommand(proc.command) !== "antigravity") continue;
+    if (!MAYBE_AGY_RE.test(proc.command)) continue;
     const open = await antigravityOpenConversations(proc.pid);
     if (!open) return null;
     if (open.includes(conversationId)) return true;

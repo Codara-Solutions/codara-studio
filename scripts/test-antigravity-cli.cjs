@@ -166,6 +166,48 @@ async function main() {
       "only <agy dir>/presence/<id>.lock names a conversation",
     );
     assert.deepEqual(presence.lsofPaths("p42\nfcwd\nn/home/u\nf7\nn/x/presence/a.lock\n"), ["/home/u", "/x/presence/a.lock"]);
+    // /proc reads: every descriptor read, the set unchanged, or no proof.
+    const enoent = () => Object.assign(new Error("gone"), { code: "ENOENT" });
+    const procFs = (lists, links) => {
+      let call = 0;
+      return {
+        readdir: async () => {
+          const list = lists[Math.min(call++, lists.length - 1)];
+          if (list === "gone") throw enoent();
+          if (list === "denied") throw Object.assign(new Error("denied"), { code: "EACCES" });
+          return list;
+        },
+        readlink: async (p) => {
+          const fd = p.split("/").pop();
+          if (!(fd in links)) throw Object.assign(new Error("denied"), { code: "EACCES" });
+          return links[fd];
+        },
+      };
+    };
+    const lock = (id) => `${presenceDir}/${id}.lock`;
+    assert.deepEqual(await presence.linuxOpenFilePaths(9, procFs([["0", "1"]], { 0: "/dev/pts/1", 1: lock("a") })), ["/dev/pts/1", lock("a")]);
+    assert.equal(
+      await presence.linuxOpenFilePaths(9, procFs([["0", "1"]], { 0: lock("a") })),
+      null,
+      "an unreadable descriptor could be a second lock: no proof",
+    );
+    assert.equal(
+      await presence.linuxOpenFilePaths(9, procFs([["0"], ["0", "1"]], { 0: lock("a") })),
+      null,
+      "a descriptor opened during the scan: no proof",
+    );
+    assert.deepEqual(await presence.linuxOpenFilePaths(9, procFs([["0", "1"], "gone"], { 0: lock("a") })), [], "exited mid-scan holds nothing");
+    assert.deepEqual(await presence.linuxOpenFilePaths(9, procFs(["gone"], {})), []);
+    await assert.rejects(presence.linuxOpenFilePaths(9, procFs(["denied"], {})), "an unreadable fd folder is not an empty one");
+    for (const [command, looked] of [
+      ["/opt/Agent Tools/agy --conversation c1", true],
+      ["agy", true],
+      ["C:\\Tools\\agy.exe -c", true],
+      ["/usr/bin/agy-helper", false],
+      ["node /home/u/agy.js", false],
+    ]) {
+      assert.equal(presence.MAYBE_AGY_RE.test(command), looked, `wake scan of ${command}`);
+    }
     assert.equal(await presence.antigravityOpenConversations(123, "win32"), null, "Windows has no way to read it: unknown");
     assert.deepEqual(await presence.antigravityOpenConversations(2 ** 31, "linux"), [], "a process gone since the listing holds nothing");
     // A pane without a real conversation id never sleeps, whatever agy holds.
@@ -218,6 +260,12 @@ async function main() {
     row.run("grandchild", "child", 2, 1);
     row.run("loop-a", "loop-b", 1, 0);
     row.run("loop-b", "loop-a", 1, 0);
+    row.run("null-flag", "", 0, null);
+    row.run("odd-flag", "", 0, 7);
+    row.run("null-sub-parent", "", 0, 0);
+    row.run("null-sub", "null-sub-parent", 1, null);
+    row.run("null-depth", "", null, 0);
+    row.run("text-flag", "", 0, "0");
     bdb.close();
     const activity = (id) => summaries.readAntigravityConversationActivity(busyDb, id);
     assert.deepEqual(activity("idle"), { known: true, busy: null });
@@ -226,6 +274,30 @@ async function main() {
     assert.deepEqual(activity("idle-sub"), { known: false, busy: null }, "a subagent conversation is not one a pane reopens");
     assert.deepEqual(activity("nope"), { known: false, busy: null });
     assert.deepEqual(activity("loop-a"), { known: false, busy: null }, "a parent loop must end the walk");
+    assert.equal(activity("null-flag"), null, "a NULL busy flag is unknown, not idle");
+    assert.equal(activity("odd-flag"), null, "a busy flag agy never writes is unknown, not idle");
+    assert.equal(activity("null-sub-parent"), null, "a subagent's NULL busy flag is unknown, not idle");
+    assert.deepEqual(activity("null-depth"), { known: false, busy: null }, "a NULL depth is not top level");
+    assert.deepEqual(activity("text-flag"), { known: true, busy: null });
+    // A write-ahead log without its index may hold a newer flag the file lacks.
+    const walDb = path.join(dir, "wal.db");
+    fs.copyFileSync(busyDb, walDb);
+    fs.writeFileSync(`${walDb}-wal`, "");
+    assert.throws(() => summaries.readAntigravityConversationActivity(walDb, "idle"), /write-ahead log/);
+    fs.writeFileSync(`${walDb}-shm`, "");
+    assert.deepEqual(summaries.readAntigravityConversationActivity(walDb, "idle"), { known: true, busy: null });
+    // A live writer's newest flag is read, log and all.
+    const liveDb = path.join(dir, "live.db");
+    const writer = new DatabaseSync(liveDb);
+    writer.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;");
+    writer.exec(
+      "CREATE TABLE conversation_summaries (conversation_id text PRIMARY KEY, parent_conversation_id text, nesting_depth integer, not_fully_idle integer)",
+    );
+    writer.exec("INSERT INTO conversation_summaries VALUES ('live', '', 0, 0)");
+    assert.deepEqual(summaries.readAntigravityConversationActivity(liveDb, "live"), { known: true, busy: null });
+    writer.exec("UPDATE conversation_summaries SET not_fully_idle = 1 WHERE conversation_id = 'live'");
+    assert.deepEqual(summaries.readAntigravityConversationActivity(liveDb, "live"), { known: true, busy: "conversation" }, "a flag still in the log read stale");
+    writer.close();
     const oldDb = path.join(dir, "old.db");
     const odb = new DatabaseSync(oldDb);
     odb.exec("CREATE TABLE conversation_summaries (conversation_id text, parent_conversation_id text, nesting_depth integer)");

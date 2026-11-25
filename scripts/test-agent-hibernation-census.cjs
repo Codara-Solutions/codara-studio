@@ -212,6 +212,12 @@ async function main() {
   check("agy with the MCP servers it started at boot may sleep", verdict.ok === true && verdict.agentPid === 701, verdict);
   verdict = classifyPaneProcessTree([agyShell, agy, agyMcp, proc(703, 701, 10 * 60_000, "bash -c npm test")], 700, "antigravity");
   check("a command agy ran after boot keeps the pane awake", !verdict.ok && verdict.reason === "other-processes", verdict);
+  verdict = classifyPaneProcessTree([agyShell, agy, agyMcp, proc(705, 701, 500, "/home/u/.local/bin/agy -r other")], 700, "antigravity");
+  check(
+    "a second agy under the first, even at boot, keeps the pane awake",
+    !verdict.ok && verdict.reason === "other-processes" && /second agy/.test(verdict.detail ?? ""),
+    verdict,
+  );
   verdict = classifyPaneProcessTree([agyShell, proc(704, 700, 0, "node /home/u/tools/agy.js")], 700, "antigravity");
   check("a pane running only something named like agy has no agent", !verdict.ok && verdict.reason === "no-agent-process", verdict);
 
