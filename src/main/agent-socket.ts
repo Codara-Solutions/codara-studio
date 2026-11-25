@@ -3186,7 +3186,7 @@ async function handleWorktree(
 async function handleWorktreeCleanup(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
   const action = params.action === undefined || params.action === null ? "scan" : params.action;
   if (action !== "scan" && action !== "remove") return errorResponse(id, ERR_INVALID_PARAMS, "action must be scan or remove");
-  for (const [key, type] of [["checkMerge", "boolean"], ["deleteRemoteBranch", "boolean"]] as const) {
+  for (const [key, type] of [["checkMerge", "boolean"], ["deleteRemoteBranch", "boolean"], ["reason", "string"]] as const) {
     const problem = optionalTypedParam(params, key, type);
     if (problem) return errorResponse(id, ERR_INVALID_PARAMS, problem);
   }
@@ -3244,6 +3244,7 @@ async function handleWorktreeCleanup(params: Record<string, unknown>, id: JsonRp
         ...(typeof staleDays === "number" ? { staleDays } : {}),
         items,
         deleteRemoteBranch: params.deleteRemoteBranch === true,
+        ...(typeof params.reason === "string" ? { reason: params.reason } : {}),
         caller,
         agent: { client: caller.client, workspaceName },
       }),

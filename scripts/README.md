@@ -613,6 +613,10 @@ unreachable remote never touched, archive pruning, and codara_worktree_remove),
 rules, the scan's facts across repositories, nothing removed without the
 user's approval, unticked, unsaved and busy worktrees kept, and remote
 branches deleted only when offered and unmoved, with a fake GitHub and remote),
+`test-worktree-cleanup-approval` (the agent's removal dialog: its one line
+cleaned and shown as text, rows that can go first, blocked rows folded and
+counted by cause, nothing ticked at first, Tick all leaving blocked rows out,
+and what ticking each row does),
 `test-worktree-setup` (what a new worktree gets from `.worktreeinclude` and
 `.codara/worktree.json`: git's own pattern matching, copies that never
 overwrite or leave the repository, the copy limit, commands in order, stop,

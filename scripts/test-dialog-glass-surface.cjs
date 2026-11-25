@@ -12,8 +12,11 @@
 //   - the approval dialog's fill is at least as opaque as the shared dialog
 //     surface, with the same frost, and no ancestor cuts the frost off
 //   - over a terminal full of text, what leaks through the dialog is blurred
-//   - nothing starts ticked, a row that cannot go cannot be ticked, the
-//     Remove button names the count, and a blocked row says why once
+//   - nothing starts ticked, a row that cannot go has no checkbox and folds
+//     into one line at the bottom, the Remove button names the count, and a
+//     blocked row says why once
+//   - with 17 rows that can go and 18 that cannot: Tick all ticks the 17 and
+//     only those go in the answer, and the agent's line shows as text
 //
 //   node scripts/test-dialog-glass-surface.cjs
 //   CODARA_GLASS_SHOTS=/some/dir node scripts/test-dialog-glass-surface.cjs   (also saves screenshots)
@@ -99,6 +102,12 @@ function approvalRequest() {
     advice: "safe",
     reason: "Its pull request #12 was merged and nothing is left to save.",
     blocked: null,
+    blockedGroup: null,
+    missing: false,
+    merged: true,
+    branchDeletable: true,
+    onRemote: true,
+    pullRequest: { number: 12, state: "merged" },
     ignored: [],
     unmergedCommits: 0,
     remote: { offered: false, reason: "No merged pull request uses it.", name: "origin", suggested: false },
@@ -107,6 +116,7 @@ function approvalRequest() {
   return {
     id: "req-1",
     agent: { client: "claude-code", workspaceName: "Widgets" },
+    reason: null,
     expiresAt: Date.now() + 5 * 60_000,
     items: [
       base("merged-docs"),
@@ -114,11 +124,72 @@ function approvalRequest() {
         advice: "review",
         reason: "Pull request #9 was closed without merging: 3 commits not merged.",
         unmergedCommits: 3,
+        merged: false,
+        pullRequest: { number: 9, state: "closed" },
       }),
-      base("dns-cutover", { advice: "keep", reason: BLOCKED, blocked: BLOCKED }),
-      base("dns-mcp", { advice: "keep", reason: "Unsaved changes: 2 files modified.", blocked: "It has unsaved changes. Only you can remove it, from Clean up worktrees." }),
+      base("dns-cutover", { advice: "keep", reason: BLOCKED, blocked: BLOCKED, blockedGroup: IN_USE }),
+      base("dns-mcp", {
+        advice: "keep",
+        reason: "Unsaved changes: 2 files modified.",
+        blocked: "It has unsaved changes. Only you can remove it, from Clean up worktrees.",
+        blockedGroup: "With unsaved changes",
+      }),
     ],
   };
+}
+
+const IN_USE = "In use by an open tab or a running program";
+const AGENT_REASON =
+  "You approved removing every merged worktree <b>today</b>. I recommend ticking all 17; the draft and closed ones only if you are done with them.";
+
+/** About what the owner was asked on 25 Nov: 17 rows that can go and 18 that cannot. */
+function crowdedRequest() {
+  const repos = ["widgets", "studio-app", "docs-site"];
+  const row = (index, extra) => {
+    const repo = repos[index % repos.length];
+    const name = `task-${String(index).padStart(2, "0")}`;
+    return {
+      repoRoot: `/work/${repo}`,
+      repoName: repo,
+      path: `/work/trees/${repo}/${name}`,
+      branch: `fix/${name}`,
+      workspaceName: null,
+      sizeBytes: 40_000_000 + index * 9_000_000,
+      advice: "safe",
+      reason: `Merged through pull request #${100 + index}, clean and idle.`,
+      blocked: null,
+      blockedGroup: null,
+      missing: false,
+      merged: true,
+      branchDeletable: true,
+      onRemote: true,
+      pullRequest: { number: 100 + index, state: "merged" },
+      ignored: [],
+      unmergedCommits: 0,
+      remote: { offered: false, reason: "No merged pull request uses it.", name: "origin", suggested: false },
+      ...extra,
+    };
+  };
+  const items = [];
+  for (let index = 0; index < 13; index += 1) items.push(row(index));
+  items.push(row(13, { advice: "keep", reason: "Pull request #213 is a draft, still open.", merged: false, unmergedCommits: 4, pullRequest: { number: 213, state: "draft" } }));
+  items.push(row(14, { advice: "review", reason: "Pull request #214 was closed without merging: 2 commits not merged.", merged: false, unmergedCommits: 2, pullRequest: { number: 214, state: "closed" } }));
+  items.push(row(15, { advice: "review", reason: "Merged, but it holds ignored files a fresh checkout does not bring back (.env.local).", ignored: [".env.local"] }));
+  items.push(row(16, { advice: "review", reason: "2 commits not merged, no activity for 21 days, no local changes. Its branch stays after removal.", merged: false, unmergedCommits: 2, pullRequest: null, onRemote: false }));
+  for (let index = 17; index < 32; index += 1) {
+    const why = `In use: the Claude Code tab “task ${index}” in Widgets.`;
+    items.push(row(index, { advice: "keep", reason: why, blocked: why, blockedGroup: IN_USE }));
+  }
+  for (let index = 32; index < 34; index += 1) {
+    items.push(row(index, {
+      advice: "keep",
+      reason: "Unsaved changes: 3 edited files.",
+      blocked: "It has unsaved changes. Only you can remove it, from Clean up worktrees.",
+      blockedGroup: "With unsaved changes",
+    }));
+  }
+  items.push(row(34, { advice: "keep", reason: "Locked with git worktree lock.", blocked: "Locked with git worktree lock.", blockedGroup: "Locked with git worktree lock" }));
+  return { id: "req-crowded", agent: { client: "claude-code", workspaceName: "Widgets" }, reason: AGENT_REASON, expiresAt: Date.now() + 5 * 60_000, items };
 }
 
 function alphaOf(color) {
@@ -329,20 +400,75 @@ async function main() {
 
         // Nothing starts ticked; Remove is off until something is, then names the count.
         const boxes = dialog.locator("li[data-worktree-path] .wtc-review-head > input[type=checkbox]");
-        assert.equal(await boxes.count(), 4);
-        for (let index = 0; index < 4; index += 1) await expect(boxes.nth(index)).not.toBeChecked();
+        assert.equal(await boxes.count(), 2, `${label}: only the rows that can go have a checkbox`);
+        for (let index = 0; index < 2; index += 1) await expect(boxes.nth(index)).not.toBeChecked();
         await expect(dialog.getByRole("button", { name: "Remove", exact: true })).toBeDisabled();
         const row = (name) => dialog.locator(`li[data-worktree-path="/work/trees/widgets/${name}"]`);
-        await expect(row("dns-cutover").getByRole("checkbox")).toBeDisabled();
-        await expect(row("dns-mcp").getByRole("checkbox")).toBeDisabled();
+        // The rows that cannot go fold into one line at the bottom.
+        await expect(row("dns-cutover")).toHaveCount(0);
+        const fold = dialog.getByRole("button", { name: /^2 cannot be removed now/ });
+        await expect(fold).toHaveAttribute("aria-expanded", "false");
+        await fold.click();
+        await expect(fold).toHaveAttribute("aria-expanded", "true");
+        await expect(row("dns-cutover")).toBeVisible();
+        assert.equal(await row("dns-cutover").getByRole("checkbox").count(), 0, `${label}: a blocked row has a checkbox`);
+        assert.equal(await row("dns-mcp").getByRole("checkbox").count(), 0, `${label}: a blocked row has a checkbox`);
         // A blocked row says why once; a blocker that adds to the reason stays.
         assert.equal(await row("dns-cutover").getByText(BLOCKED, { exact: true }).count(), 1, `${label}: the blocked reason is repeated`);
         await expect(row("dns-mcp").locator(".wtc-review-blocker")).toHaveText(/unsaved changes/);
+        await fold.click();
         await row("abandoned").getByRole("checkbox", { name: "Remove feat/abandoned" }).check();
         await expect(dialog.getByRole("button", { name: "Remove 1 worktree" })).toBeEnabled();
         if (shots) await page.screenshot({ path: path.join(shots, `approval-${theme.mode}-${viewport.width}-ticked.png`) });
         assert.deepEqual(errors, [], `${label}: page errors`);
         console.log(`  ok ${label}: fill ${look.background}, leak inside ${leak.inside.toFixed(2)} vs outside ${leak.outside.toFixed(2)}`);
+
+        // The crowded case: 17 that can go, 18 that cannot, and the agent's line.
+        await page.evaluate(() => {
+          window.answers = [];
+          document.getElementById("root").remove();
+          const host = document.createElement("div");
+          host.id = "root";
+          host.style.cssText = "position: fixed; inset: 0;";
+          document.body.appendChild(host);
+        });
+        const crowded = crowdedRequest();
+        await page.evaluate((request) => window.mountApproval(request), crowded);
+        await expect(dialog).toBeVisible();
+        await page.waitForTimeout(300);
+        const said = dialog.getByTestId("worktree-cleanup-agent-reason");
+        await expect(said.locator("q")).toHaveText(AGENT_REASON);
+        assert.equal(await said.locator("b").count(), 0, `${label}: the agent's markup rendered`);
+        await expect(said).toContainText("claude-code in Widgets says");
+        const crowdedBoxes = dialog.locator("li[data-worktree-path] .wtc-review-head > input[type=checkbox]");
+        assert.equal(await crowdedBoxes.count(), 17);
+        assert.equal(await dialog.locator("li[data-worktree-path] input:checked").count(), 0, `${label}: something starts ticked`);
+        await expect(dialog.getByText("17 worktrees can be removed")).toBeVisible();
+        await expect(dialog.getByRole("button", { name: /^18 cannot be removed now/ })).toHaveAttribute("aria-expanded", "false");
+        assert.equal(await dialog.getByText("keep", { exact: true }).count(), 0, `${label}: a badge says keep`);
+        await expect(dialog.getByText("Folder goes. Branch and pull request #213 stay on GitHub.")).toBeVisible();
+        if (shots) await page.screenshot({ path: path.join(shots, `crowded-${theme.mode}-${viewport.width}.png`) });
+        await dialog.getByRole("button", { name: "Tick all 17" }).click();
+        await expect(dialog.getByRole("button", { name: "Remove 17 worktrees" })).toBeEnabled();
+        await dialog.getByRole("button", { name: "Untick all" }).click();
+        await expect(dialog.getByRole("button", { name: "Remove", exact: true })).toBeDisabled();
+        await dialog.getByRole("button", { name: "Tick all 17" }).click();
+        await dialog.getByRole("button", { name: /^18 cannot be removed now/ }).click();
+        await expect(dialog.getByRole("heading", { name: `${IN_USE} · 15` })).toBeVisible();
+        await expect(dialog.getByRole("heading", { name: "With unsaved changes · 2" })).toBeVisible();
+        await expect(dialog.getByRole("heading", { name: "Locked with git worktree lock · 1" })).toBeVisible();
+        assert.equal(await dialog.locator("li.is-blocked input").count(), 0, `${label}: a blocked row has a checkbox`);
+        if (shots) {
+          await dialog.locator(".wtc-fold").scrollIntoViewIfNeeded();
+          await page.screenshot({ path: path.join(shots, `crowded-${theme.mode}-${viewport.width}-ticked-open.png`) });
+        }
+        await dialog.getByRole("button", { name: "Remove 17 worktrees" }).click();
+        const answer = await page.evaluate(() => window.answers[0]);
+        assert.equal(answer.approved, true);
+        const sent = new Map(answer.items.map((entry) => [entry.path, entry.remove]));
+        for (const entry of crowded.items) assert.equal(sent.get(entry.path), entry.blocked === null, `${label}: ${entry.path} sent wrong`);
+        assert.deepEqual(errors, [], `${label}: page errors`);
+        console.log(`  ok ${label}: 17 ticked with Tick all, 18 folded and never sent`);
         await page.close();
       }
     }

@@ -1,88 +1,94 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatBytes, plural } from "@shared/worktree-cleanup";
 import {
-  ADVICE_LABELS,
-  type WorktreeAdvice,
+  APPROVAL_BADGE_LABELS,
+  approvalAnswerItems,
+  approvalBadge,
+  approvalKey,
+  approvalLayout,
+  initialApprovalChoices,
+  tickAllApprovals,
+  tickEffect,
+  untickAllApprovals,
+  type ApprovalBadge,
+  type ApprovalChoice,
   type WorktreeCleanupAgentResult,
   type WorktreeCleanupApprovalItem,
   type WorktreeCleanupApprovalRequest,
 } from "@shared/worktree-cleanup-agent";
 import { Spinner } from "../git/git-ui";
-import { checkKey, ResultsView } from "./WorktreeReview";
+import { ResultsView } from "./WorktreeReview";
 import { Badge, rowTitle, type BadgeTone } from "./WorktreeRow";
 import "./worktree-cleanup.css";
 
 // An agent asked to remove worktrees through codara_worktree_cleanup. The
-// user sees exactly what would go, with the agent's recommendation and its
-// reason, and ticks what may go: nothing starts ticked, so a stray Enter or
-// click removes nothing; a worktree with unsaved changes or in use cannot be
-// ticked at all, and deleting a merged branch on the remote is a separate,
-// unticked choice per worktree. Nothing happens until the user presses
-// Remove, which names how many go; closing the dialog declines.
+// user sees the agent's own line, then the rows that may go, each saying what
+// ticking it removes and what stays, and ticks what may go: nothing starts
+// ticked, so a stray Enter or click removes nothing. Rows that cannot go (in
+// use, unsaved changes) have no checkbox at all and fold into one line at the
+// bottom, counted by cause. Deleting a merged branch on the remote is a
+// separate, unticked choice per worktree. Nothing happens until the user
+// presses Remove, which names how many go; closing the dialog declines.
 
-const ADVICE_TONE: Record<WorktreeAdvice, BadgeTone> = { safe: "ok", review: "warn", keep: "neutral" };
+const BADGE_TONE: Record<ApprovalBadge, BadgeTone> = { safe: "ok", check: "warn" };
 
-interface Choice {
-  remove: boolean;
-  deleteRemoteBranch: boolean;
-}
+const NO_CHOICE: ApprovalChoice = { remove: false, deleteRemoteBranch: false };
 
 function errorMessage(err: unknown): string {
   const text = err instanceof Error ? err.message : String(err);
   return text.replace(/^Error invoking remote method '[^']+': (Error: )?/, "");
 }
 
-function initialChoices(items: readonly WorktreeCleanupApprovalItem[]): Record<string, Choice> {
-  return Object.fromEntries(items.map((item) => [checkKey(item), { remove: false, deleteRemoteBranch: false }]));
+function where(item: WorktreeCleanupApprovalItem): string {
+  return [item.repoName, item.workspaceName ? `workspace ${item.workspaceName}` : null].filter(Boolean).join(" · ");
+}
+
+function sizeOf(item: WorktreeCleanupApprovalItem): string {
+  return item.sizeBytes !== null ? formatBytes(item.sizeBytes) : "Size unknown";
 }
 
 function ApprovalItem({
   item,
   choice,
+  deleteMergedBranches,
   onChange,
 }: {
   item: WorktreeCleanupApprovalItem;
-  choice: Choice;
-  onChange: (change: Partial<Choice>) => void;
+  choice: ApprovalChoice;
+  deleteMergedBranches: boolean;
+  onChange: (change: Partial<ApprovalChoice>) => void;
 }): React.ReactElement {
-  const id = `wtc-approve-${checkKey(item).replace(/[^A-Za-z0-9]+/g, "-")}`;
-  const blocked = item.blocked !== null;
+  const id = `wtc-approve-${approvalKey(item).replace(/[^A-Za-z0-9]+/g, "-")}`;
+  const badge = approvalBadge(item);
   return (
-    <li className={`wtc-review-item${blocked ? " is-blocked" : ""}`} data-worktree-path={item.path}>
+    <li className="wtc-review-item" data-worktree-path={item.path}>
       <div className="wtc-review-head">
         <input
           id={id}
           type="checkbox"
-          checked={!blocked && choice.remove}
-          disabled={blocked}
+          checked={choice.remove}
           aria-label={`Remove ${rowTitle({ branch: item.branch, head: null })}`}
           onChange={(event) => onChange({ remove: event.target.checked })}
         />
         <label htmlFor={id} className="wtc-row-name">
           {item.branch ?? "Detached HEAD"}
         </label>
-        <Badge tone={ADVICE_TONE[item.advice]}>{ADVICE_LABELS[item.advice]}</Badge>
-        <span className="wtc-review-size">{item.sizeBytes !== null ? formatBytes(item.sizeBytes) : "Size unknown"}</span>
+        <Badge tone={BADGE_TONE[badge]}>{APPROVAL_BADGE_LABELS[badge]}</Badge>
+        <span className="wtc-review-size">{sizeOf(item)}</span>
       </div>
-      <div className="wtc-review-note">
-        {[item.repoName, item.workspaceName ? `workspace ${item.workspaceName}` : null].filter(Boolean).join(" · ")}
-      </div>
+      <div className="wtc-review-note">{where(item)}</div>
       <div className="wtc-row-path" title={item.path}>
         {item.path}
       </div>
       <div className="wtc-review-detail">{item.reason}</div>
-      {blocked && item.blocked !== item.reason ? <div className="wtc-review-blocker">{item.blocked}</div> : null}
-      {!blocked && item.ignored.length ? (
+      <div className="wtc-review-effect" data-testid="worktree-cleanup-effect">
+        <span className="wtc-review-note">If ticked: </span>
+        {tickEffect(item, deleteMergedBranches)}
+      </div>
+      {item.ignored.length ? (
         <div className="wtc-review-note">{`Removing it deletes these ignored files: ${item.ignored.join(", ")}.`}</div>
       ) : null}
-      {!blocked && item.unmergedCommits > 0 ? (
-        <div className="wtc-review-note">
-          {item.branch
-            ? `${plural(item.unmergedCommits, "commit")} not merged. The branch ${item.branch} stays so nothing is lost.`
-            : `${plural(item.unmergedCommits, "commit")} not merged. Codara keeps them under a recovery ref for 30 days.`}
-        </div>
-      ) : null}
-      {!blocked && item.remote.offered ? (
+      {item.remote.offered ? (
         <div className="wtc-review-confirm">
           <label>
             <input
@@ -97,10 +103,31 @@ function ApprovalItem({
             {`${item.remote.reason} Uses your own git sign-in.${item.remote.suggested ? " The agent suggests it." : ""}`}
           </div>
         </div>
-      ) : !blocked && item.branch ? (
-        <div className="wtc-review-note">{`The remote branch stays. ${item.remote.reason}`}</div>
       ) : null}
     </li>
+  );
+}
+
+/** A row that cannot go: no checkbox, only what it is and why. */
+function BlockedItem({ item }: { item: WorktreeCleanupApprovalItem }): React.ReactElement {
+  return (
+    <li className="wtc-review-item is-blocked" data-worktree-path={item.path}>
+      <div className="wtc-review-head">
+        <span className="wtc-row-name">{item.branch ?? "Detached HEAD"}</span>
+        <span className="wtc-review-size">{sizeOf(item)}</span>
+      </div>
+      <div className="wtc-review-note">{where(item)}</div>
+      <div className="wtc-review-detail">{item.reason}</div>
+      {item.blocked && item.blocked !== item.reason ? <div className="wtc-review-blocker">{item.blocked}</div> : null}
+    </li>
+  );
+}
+
+function Chevron({ open }: { open: boolean }): React.ReactElement {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true" className={`wtc-fold-chevron${open ? " is-open" : ""}`}>
+      <path d="M3.5 2l3 3-3 3" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 
@@ -111,7 +138,8 @@ export default function WorktreeCleanupApproval({
   request: WorktreeCleanupApprovalRequest;
   onDone: () => void;
 }): React.ReactElement {
-  const [choices, setChoices] = useState<Record<string, Choice>>(() => initialChoices(request.items));
+  const [choices, setChoices] = useState<Record<string, ApprovalChoice>>(() => initialApprovalChoices(request.items));
+  const [showBlocked, setShowBlocked] = useState(false);
   const [deleteMergedBranches, setDeleteMergedBranches] = useState(true);
   const [removing, setRemoving] = useState(false);
   const [result, setResult] = useState<WorktreeCleanupAgentResult | null>(null);
@@ -131,13 +159,13 @@ export default function WorktreeCleanupApproval({
     };
   }, []);
 
+  const layout = useMemo(() => approvalLayout(request.items), [request.items]);
   const picked = useMemo(
-    () => request.items.filter((item) => item.blocked === null && choices[checkKey(item)]?.remove),
-    [request.items, choices],
+    () => layout.removable.filter((item) => choices[approvalKey(item)]?.remove),
+    [layout, choices],
   );
   const pickedBytes = picked.reduce((total, item) => total + (item.sizeBytes ?? 0), 0);
-  const remoteCount = picked.filter((item) => item.remote.offered && choices[checkKey(item)]?.deleteRemoteBranch).length;
-  const blockedCount = request.items.filter((item) => item.blocked !== null).length;
+  const remoteCount = picked.filter((item) => item.remote.offered && choices[approvalKey(item)]?.deleteRemoteBranch).length;
 
   const send = useCallback(
     async (approved: boolean): Promise<void> => {
@@ -149,16 +177,7 @@ export default function WorktreeCleanupApproval({
         const done = await window.spark.worktreeCleanup.answerApproval({
           id: request.id,
           approved,
-          items: request.items.map((item) => {
-            const choice = choices[checkKey(item)];
-            const remove = approved && item.blocked === null && Boolean(choice?.remove);
-            return {
-              repoRoot: item.repoRoot,
-              path: item.path,
-              remove,
-              deleteRemoteBranch: remove && item.remote.offered && Boolean(choice?.deleteRemoteBranch),
-            };
-          }),
+          items: approvalAnswerItems(request.items, choices, approved),
           deleteMergedBranches,
         });
         if (!mounted.current) return;
@@ -260,9 +279,23 @@ export default function WorktreeCleanupApproval({
               </svg>
             </button>
           </div>
+          {!result && request.reason ? (
+            <div className="wtc-agent-reason" data-testid="worktree-cleanup-agent-reason">
+              <span className="wtc-review-note">{`${asker} says`}</span>
+              <q>{request.reason}</q>
+            </div>
+          ) : null}
+          {!result ? (
+            <div className="wtc-review-note wtc-legend">
+              <Badge tone={BADGE_TONE.safe}>{APPROVAL_BADGE_LABELS.safe}</Badge>
+              <span>merged, nothing is lost.</span>
+              <Badge tone={BADGE_TONE.check}>{APPROVAL_BADGE_LABELS.check}</Badge>
+              <span>read why before ticking. Work that is not merged stays on its branch.</span>
+            </div>
+          ) : null}
           {!result ? (
             <div className="wtc-review-note">
-              {`Nothing is removed until you press Remove. Only what you tick goes; each one is checked again first. The agent waits until ${until}.`}
+              {`Nothing is removed until you press Remove. Each one you tick is checked again first. The agent waits until ${until}.`}
             </div>
           ) : null}
           {error ? (
@@ -305,17 +338,37 @@ export default function WorktreeCleanupApproval({
                 <span>Also delete the local branch of each merged worktree</span>
                 <span className="wtc-review-note">A branch with commits that are not merged always stays.</span>
               </label>
+              <div className="wtc-approval-bar">
+                <span className="wtc-approval-count">{`${plural(layout.removable.length, "worktree")} can be removed`}</span>
+                <button
+                  type="button"
+                  className="spark-btn wtc-btn-small"
+                  onClick={() => setChoices((current) => tickAllApprovals(request.items, current))}
+                  disabled={removing || picked.length === layout.removable.length}
+                >
+                  {`Tick all ${layout.removable.length}`}
+                </button>
+                <button
+                  type="button"
+                  className="spark-btn wtc-btn-small"
+                  onClick={() => setChoices(untickAllApprovals(request.items))}
+                  disabled={removing || picked.length === 0}
+                >
+                  Untick all
+                </button>
+              </div>
               <ul className="wtc-review-list" aria-label="Worktrees the agent asks to remove">
-                {request.items.map((item) => {
-                  const key = checkKey(item);
+                {layout.removable.map((item) => {
+                  const key = approvalKey(item);
                   return (
                     <ApprovalItem
                       key={key}
                       item={item}
-                      choice={choices[key] ?? { remove: false, deleteRemoteBranch: false }}
+                      choice={choices[key] ?? NO_CHOICE}
+                      deleteMergedBranches={deleteMergedBranches}
                       onChange={(change) =>
                         setChoices((current) => {
-                          const next = { ...(current[key] ?? { remove: false, deleteRemoteBranch: false }), ...change };
+                          const next = { ...(current[key] ?? NO_CHOICE), ...change };
                           if (!next.remove) next.deleteRemoteBranch = false;
                           return { ...current, [key]: next };
                         })
@@ -324,6 +377,37 @@ export default function WorktreeCleanupApproval({
                   );
                 })}
               </ul>
+              {layout.blockedCount ? (
+                <div className="wtc-fold">
+                  <button
+                    type="button"
+                    className="wtc-fold-toggle"
+                    aria-expanded={showBlocked}
+                    aria-controls="wtc-approval-blocked"
+                    onClick={() => setShowBlocked((open) => !open)}
+                  >
+                    <Chevron open={showBlocked} />
+                    <span>{`${layout.blockedCount} cannot be removed now`}</span>
+                    <span className="wtc-fold-hint">
+                      {layout.blocked.map((group) => `${group.items.length} ${group.label.charAt(0).toLowerCase()}${group.label.slice(1)}`).join(" · ")}
+                    </span>
+                  </button>
+                  {showBlocked ? (
+                    <div id="wtc-approval-blocked" className="wtc-fold-body">
+                      {layout.blocked.map((group) => (
+                        <section key={group.label} className="wtc-fold-group" aria-label={group.label}>
+                          <h3>{`${group.label} · ${group.items.length}`}</h3>
+                          <ul className="wtc-review-list">
+                            {group.items.map((item) => (
+                              <BlockedItem key={approvalKey(item)} item={item} />
+                            ))}
+                          </ul>
+                        </section>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           )}
         </div>
@@ -345,9 +429,7 @@ export default function WorktreeCleanupApproval({
                   ? `${plural(picked.length, "worktree")} ticked${pickedBytes ? `, ${formatBytes(pickedBytes)} to free` : ""}${
                       remoteCount ? `, ${plural(remoteCount, "remote branch", "remote branches")} to delete` : ""
                     }`
-                  : blockedCount
-                    ? `${plural(blockedCount, "worktree")} cannot be removed here`
-                    : "Nothing ticked"}
+                  : "Nothing ticked"}
               </span>
               {removing ? <Spinner size={12} /> : null}
               <button type="button" className="spark-btn" onClick={decline} disabled={removing}>

@@ -108,19 +108,26 @@ test("an agent's cleanup request removes only what the user approves", async ({}
       action: "remove",
       paths: [merged, done, dirty, idea],
       callerClient: "claude-code",
+      reason: "You approved removing merged worktrees. I recommend feature/merged.",
     });
     const dialog = page.getByRole("dialog", { name: "Remove worktrees?" });
     await expect(dialog).toBeVisible({ timeout: 60_000 });
     await expect(dialog.getByText("claude-code asks to remove 4 worktrees")).toBeVisible();
+    await expect(dialog.getByTestId("worktree-cleanup-agent-reason")).toContainText(
+      "You approved removing merged worktrees. I recommend feature/merged.",
+    );
     const item = (path: string) => dialog.locator(`li[data-worktree-path="${path}"]`);
     await expect(item(merged).getByRole("checkbox", { name: "Remove feature/merged" })).not.toBeChecked();
     await expect(item(done).getByRole("checkbox", { name: "Remove feature/done" })).not.toBeChecked();
     await expect(dialog.getByRole("button", { name: "Remove", exact: true })).toBeDisabled();
-    await expect(item(dirty).getByRole("checkbox", { name: "Remove feature/dirty" })).toBeDisabled();
+    // The row with unsaved changes has no checkbox and waits in the fold.
+    await expect(item(dirty)).toHaveCount(0);
+    await dialog.getByRole("button", { name: /^1 cannot be removed now/ }).click();
     await expect(item(dirty).getByText(/unsaved changes/)).toBeVisible();
+    await expect(item(dirty).getByRole("checkbox")).toHaveCount(0);
     await expect(item(idea).getByRole("checkbox", { name: "Remove feature/idea" })).not.toBeChecked();
-    await expect(item(merged).getByText("safe to remove", { exact: true })).toBeVisible();
-    await expect(item(merged).getByText(/The remote branch stays\. The repository has no remote\./)).toBeVisible();
+    await expect(item(merged).getByText("Safe to remove", { exact: true })).toBeVisible();
+    await expect(item(merged).getByText("Merged: folder and local branch go.")).toBeVisible();
     await item(merged).getByRole("checkbox", { name: "Remove feature/merged" }).check();
     await expect(dialog.getByRole("button", { name: "Remove 1 worktree" })).toBeEnabled();
     expect(existsSync(merged)).toBe(true);

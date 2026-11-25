@@ -363,9 +363,17 @@ async function main() {
     const allPaths = [merged, envfile, stale, local, dirty, busy, openpr, moved].map((dir) => ({ path: dir }));
 
     await check("nothing is removed without an answer, or when the user declines", async () => {
-      const timedOut = await tool.removeForAgent(deps, { items: allPaths }, context, asker(null));
+      const timedOut = await tool.removeForAgent(
+        deps,
+        { items: allPaths, reason: "You approved: remove every merged one.\nI recommend the 2 safe ones." },
+        context,
+        asker(null),
+      );
       assert.equal(timedOut.status, "timeout");
       assert.equal(timedOut.removed.length, 0);
+      assert.equal(asked[asked.length - 1].reason, "You approved: remove every merged one. I recommend the 2 safe ones.", "the agent's line reaches the dialog on one line");
+      assert.equal(timedOut.blockedBeforeAsking, 2, "the dirty and the busy one were blocked before the user was asked");
+      assert.match(timedOut.note, /2 of 8 could not be removed before the user was asked/);
       const declined = await tool.removeForAgent(
         deps,
         { items: allPaths },
@@ -380,6 +388,7 @@ async function main() {
     await check("the request lists every asked worktree with what may be ticked", async () => {
       const request = asked[0];
       assert.equal(request.agent.client, "claude-code");
+      assert.equal(asked[1].reason, null, "no reason given, none shown");
       assert.equal(request.agent.workspaceName, "repo");
       const byPath = new Map(request.items.map((entry) => [entry.path, entry]));
       // Nothing starts ticked: the dialog has no per-item default to send.
@@ -389,7 +398,14 @@ async function main() {
       assert.equal(byPath.get(envfile).blocked, null);
       assert.deepEqual(byPath.get(envfile).ignored, [".env.local"]);
       assert.match(byPath.get(dirty).blocked, /unsaved changes/);
+      assert.equal(byPath.get(dirty).blockedGroup, "With unsaved changes");
       assert.match(byPath.get(busy).blocked, /In use/);
+      assert.equal(byPath.get(busy).blockedGroup, "In use by an open tab or a running program");
+      assert.equal(byPath.get(merged).blockedGroup, null);
+      assert.equal(byPath.get(merged).merged, true);
+      assert.equal(byPath.get(merged).onRemote, true);
+      assert.equal(byPath.get(openpr).merged, false);
+      assert.equal(byPath.get(openpr).pullRequest.state, "open");
       assert.equal(byPath.get(openpr).blocked, null, "an open pull request may still be ticked explicitly");
       assert.equal(byPath.get(openpr).remote.offered, false);
     });
@@ -413,6 +429,7 @@ async function main() {
         })),
       );
       assert.equal(result.status, "done");
+      assert.equal(result.blockedBeforeAsking, 2);
       const removed = result.removed.map((entry) => entry.path).sort();
       assert.deepEqual(removed, [envfile, openpr].sort());
       assert.ok(!fs.existsSync(envfile));
@@ -494,6 +511,8 @@ async function main() {
       const before = asked.length;
       const refused = await tool.removeForAgent(deps, { items: [{ path: mine }] }, other, asker(null));
       assert.equal(refused.status, "nothing-to-remove");
+      assert.equal(refused.blockedBeforeAsking, 1, "the agent learns every row was blocked");
+      assert.match(refused.note, /the user was not asked\. 1 of 1 could not be removed/);
       assert.match(refused.skipped[0].reason, /In use: the agent in .*which made it/);
       assert.equal(asked.length, before, "another agent's request is refused before the user is asked");
       assert.ok(fs.existsSync(mine));

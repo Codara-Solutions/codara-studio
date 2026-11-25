@@ -260,6 +260,17 @@ export interface WorktreeCleanupApprovalItem {
   reason: string;
   /** Null when the user may tick it; otherwise why it can never be removed here. */
   blocked: string | null;
+  /** The cause in a few words, the same for every row it blocks, so the dialog can count them; null when not blocked. */
+  blockedGroup: string | null;
+  /** The folder is already gone. */
+  missing: boolean;
+  /** The full check found every commit in the base branch. */
+  merged: boolean;
+  /** The local branch goes with it when merged branches are deleted. */
+  branchDeletable: boolean;
+  /** Whether the branch is on the remote; null when unknown. */
+  onRemote: boolean | null;
+  pullRequest: { number: number; state: AgentPullRequestState } | null;
   /** Ignored files the removal deletes, listed so the user sees them before ticking. */
   ignored: string[];
   /** Commits a removal leaves only on the branch (which stays) or a recovery ref. */
@@ -270,6 +281,8 @@ export interface WorktreeCleanupApprovalItem {
 export interface WorktreeCleanupApprovalRequest {
   id: string;
   agent: { client: string; workspaceName: string | null };
+  /** The agent's one line (agentReasonLine): the rule the user approved and what it recommends. Plain text. */
+  reason: string | null;
   items: WorktreeCleanupApprovalItem[];
   /** Epoch ms after which the answer is no longer waited for. */
   expiresAt: number;
@@ -300,5 +313,142 @@ export interface WorktreeCleanupAgentResult {
   /** What the removal did per worktree, as the cleanup screen shows it. */
   outcomes?: WorktreeCleanupOutcome[];
   keptBranches?: WorktreeKeptBranch[];
+  /** Asked-for worktrees that could not be removed before the user was asked (in use, unsaved changes...); skipped says why. */
+  blockedBeforeAsking?: number;
   note: string;
+}
+
+// ── The approval dialog ────────────────────────────────────────────────────
+
+export const AGENT_REASON_MAX = 200;
+
+/**
+ * The agent's line as the dialog shows it: plain text on one line, at most
+ * AGENT_REASON_MAX characters, null when empty. Control, zero-width and
+ * direction-changing characters go, so the line cannot break the layout or
+ * make text read in another order than it is stored.
+ */
+export function agentReasonLine(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const line = value
+    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!line) return null;
+  const chars = Array.from(line);
+  return chars.length > AGENT_REASON_MAX ? `${chars.slice(0, AGENT_REASON_MAX - 1).join("").trimEnd()}…` : line;
+}
+
+/** What the dialog's badge says. A row that can be ticked never says keep. */
+export type ApprovalBadge = "safe" | "check";
+
+export const APPROVAL_BADGE_LABELS: Record<ApprovalBadge, string> = {
+  safe: "Safe to remove",
+  check: "Check first",
+};
+
+export const APPROVAL_LEGEND =
+  "Safe to remove: merged, nothing is lost. Check first: read why before ticking. Work that is not merged stays on its branch.";
+
+export function approvalBadge(item: Pick<WorktreeCleanupApprovalItem, "advice">): ApprovalBadge {
+  return item.advice === "safe" ? "safe" : "check";
+}
+
+export interface ApprovalLayout<T> {
+  /** Rows the user may tick: safe ones first, otherwise in the order given. */
+  removable: T[];
+  /** Rows that cannot be removed now, grouped by cause, the largest group first. */
+  blocked: Array<{ label: string; items: T[] }>;
+  blockedCount: number;
+}
+
+export function approvalLayout<T extends Pick<WorktreeCleanupApprovalItem, "advice" | "blocked" | "blockedGroup">>(
+  items: readonly T[],
+): ApprovalLayout<T> {
+  const removable = items.filter((item) => item.blocked === null);
+  const ordered = [...removable.filter((item) => item.advice === "safe"), ...removable.filter((item) => item.advice !== "safe")];
+  const groups = new Map<string, T[]>();
+  for (const item of items) {
+    if (item.blocked === null) continue;
+    const label = item.blockedGroup ?? item.blocked;
+    const group = groups.get(label);
+    if (group) group.push(item);
+    else groups.set(label, [item]);
+  }
+  const blocked = [...groups].map(([label, entries]) => ({ label, items: entries }));
+  blocked.sort((a, b) => b.items.length - a.items.length || a.label.localeCompare(b.label));
+  return { removable: ordered, blocked, blockedCount: items.length - removable.length };
+}
+
+export interface ApprovalChoice {
+  remove: boolean;
+  deleteRemoteBranch: boolean;
+}
+
+export function approvalKey(item: { repoRoot: string; path: string }): string {
+  return `${item.repoRoot}\u0000${item.path}`;
+}
+
+/** Nothing starts ticked, remote branches included. */
+export function initialApprovalChoices(items: readonly WorktreeCleanupApprovalItem[]): Record<string, ApprovalChoice> {
+  return Object.fromEntries(items.map((item) => [approvalKey(item), { remove: false, deleteRemoteBranch: false }]));
+}
+
+/** Ticks every row that may go. A blocked row stays unticked; a remote branch stays as it was. */
+export function tickAllApprovals(
+  items: readonly WorktreeCleanupApprovalItem[],
+  choices: Readonly<Record<string, ApprovalChoice>>,
+): Record<string, ApprovalChoice> {
+  const next: Record<string, ApprovalChoice> = { ...choices };
+  for (const item of items) {
+    const key = approvalKey(item);
+    const current = choices[key] ?? { remove: false, deleteRemoteBranch: false };
+    next[key] = item.blocked === null ? { ...current, remove: true } : { remove: false, deleteRemoteBranch: false };
+  }
+  return next;
+}
+
+export function untickAllApprovals(items: readonly WorktreeCleanupApprovalItem[]): Record<string, ApprovalChoice> {
+  return initialApprovalChoices(items);
+}
+
+/** The answer's items: a blocked row is never sent as remove, nor a remote branch the dialog did not offer. */
+export function approvalAnswerItems(
+  items: readonly WorktreeCleanupApprovalItem[],
+  choices: Readonly<Record<string, ApprovalChoice>>,
+  approved: boolean,
+): WorktreeCleanupApprovalAnswer["items"] {
+  return items.map((item) => {
+    const choice = choices[approvalKey(item)];
+    const remove = approved && item.blocked === null && Boolean(choice?.remove);
+    return {
+      repoRoot: item.repoRoot,
+      path: item.path,
+      remove,
+      deleteRemoteBranch: remove && item.remote.offered && Boolean(choice?.deleteRemoteBranch),
+    };
+  });
+}
+
+/** One line in plain words: what ticking the row removes and what stays. */
+export function tickEffect(item: WorktreeCleanupApprovalItem, deleteMergedBranches: boolean): string {
+  if (item.missing) return "The folder is already gone: only git's record of it goes.";
+  const commits = item.unmergedCommits;
+  if (!item.branch) {
+    return commits > 0 ? `Folder goes. Its ${plural(commits, "commit")} ${commits === 1 ? "stays" : "stay"} recoverable for 30 days.` : "Folder goes.";
+  }
+  const pr = item.pullRequest && item.pullRequest.state !== "none" && item.pullRequest.state !== "unknown" ? item.pullRequest : null;
+  const where = pr ? "GitHub" : (item.remote.name ?? "the remote");
+  if (item.merged && commits === 0) {
+    const local = deleteMergedBranches && item.branchDeletable ? "Merged: folder and local branch go." : "Merged: folder goes, the local branch stays.";
+    if (item.onRemote !== true) return local;
+    return item.remote.offered ? `${local} The branch on ${where} stays unless you tick it below.` : `${local} The branch on ${where} stays.`;
+  }
+  if (pr && (pr.state === "open" || pr.state === "draft") && item.onRemote === true) {
+    return `Folder goes. Branch and pull request #${pr.number} stay on GitHub.`;
+  }
+  if (item.onRemote === true) return `Folder goes. The branch stays, here and on ${where}.`;
+  const kept = commits > 0 ? `, with its ${plural(commits, "commit")} that ${commits === 1 ? "is" : "are"} not merged` : "";
+  if (item.onRemote === false) return `Folder goes. The branch stays on this computer only${kept}.`;
+  return `Folder goes. The branch stays${kept}.`;
 }

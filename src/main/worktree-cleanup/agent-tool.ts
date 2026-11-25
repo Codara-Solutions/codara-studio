@@ -1,10 +1,11 @@
 import { isAbsolute } from "node:path";
 import { isRemotePath } from "@shared/remote";
-import type { WorktreeCleanupRow, WorktreeRemovalCheck, WorktreeSize } from "@shared/worktree-cleanup";
+import type { WorktreeCleanupCode, WorktreeCleanupRow, WorktreeRemovalCheck, WorktreeSize } from "@shared/worktree-cleanup";
 import { formatBytes } from "@shared/worktree-cleanup";
 import {
   ADVICE_LABELS,
   DEFAULT_ADVICE_STALE_DAYS,
+  agentReasonLine,
   adviseWorktree,
   hasUnsavedChanges,
   onlyIgnoredWork,
@@ -435,7 +436,7 @@ export async function scanForAgent(
     notCovered: collected.notCovered,
     ...(collected.processScan ? {} : { note: "Running programs are not checked on this system." }),
     next:
-      "Explain the recommendations to the user in plain words. To remove, call again with action:\"remove\" and the paths; Codara asks the user to approve each one.",
+      "Explain the recommendations to the user in plain words. To remove, call again with action:\"remove\", the paths and a one-line reason: the rule the user approved and what you recommend. Codara shows it and asks the user to approve each one.",
   };
 }
 
@@ -445,25 +446,50 @@ export interface RemoveForAgentInput {
   items: Array<{ path: string; deleteRemoteBranch?: boolean }>;
   deleteRemoteBranch?: boolean;
   staleDays?: number;
+  /** The agent's line for the user, shown above the list (agentReasonLine). */
+  reason?: string;
 }
 
 /** Shows the request to the user; null when they did not answer in time, "no-window" when it could not be shown. */
 export type ApprovalAsker = (request: Omit<WorktreeCleanupApprovalRequest, "id" | "expiresAt">) => Promise<WorktreeCleanupApprovalAnswer | null | "no-window">;
 
-function blockedReason(facts: AgentWorktreeFacts): string | null {
+const IN_USE_GROUP = "In use by an open tab or a running program";
+
+/** The dialog counts blocked rows under these few words, one per cause. */
+const BLOCKED_GROUPS: Partial<Record<WorktreeCleanupCode, string>> = {
+  IN_USE: IN_USE_GROUP,
+  LOCKED: "Locked with git worktree lock",
+  MAIN_CHECKOUT: "Main checkout",
+  NOT_REGISTERED: "Not a worktree git knows",
+  PROTECTED_PATH: "A protected folder",
+  NESTED_CHECKOUT: "Holds another checkout inside",
+  MOUNT_INSIDE: "A drive is mounted inside",
+  REPO_BUSY: "The repository was busy",
+  GIT_FAILED: "Git could not read it",
+  CHANGED: "Changed during the check",
+  UNCHECKED: "The full check did not finish",
+  DIRTY_NOT_CONFIRMED: "With unsaved changes",
+  ARCHIVE_FAILED: "Its ignored files could not be archived",
+};
+
+function blockedReason(facts: AgentWorktreeFacts): { text: string; group: string } | null {
   const { row, check } = facts;
-  if (!check) return "The full check did not finish.";
-  if (row.inUse.length) return `In use: ${row.inUse.map((use) => use.label).join(", ")}.`;
+  if (!check) return { text: "The full check did not finish.", group: "The full check did not finish" };
+  if (row.inUse.length) return { text: `In use: ${row.inUse.map((use) => use.label).join(", ")}.`, group: IN_USE_GROUP };
   if (hasUnsavedChanges({ dirty: row.dirty, localWork: check.localWork, missing: row.missing })) {
-    return "It has unsaved changes. Only you can remove it, from Clean up worktrees.";
+    return { text: "It has unsaved changes. Only you can remove it, from Clean up worktrees.", group: "With unsaved changes" };
   }
-  if (check.blockers.length) return check.blockers[0].message;
+  if (check.blockers.length) {
+    const first = check.blockers[0];
+    return { text: first.message, group: BLOCKED_GROUPS[first.code] ?? first.message };
+  }
   return null;
 }
 
 function approvalItem(facts: AgentWorktreeFacts, suggestedRemote: boolean): WorktreeCleanupApprovalItem {
   const { row, check } = facts;
-  const blocked = blockedReason(facts);
+  const why = blockedReason(facts);
+  const blocked = why?.text ?? null;
   return {
     repoRoot: row.repoRoot,
     repoName: row.repoName,
@@ -474,6 +500,12 @@ function approvalItem(facts: AgentWorktreeFacts, suggestedRemote: boolean): Work
     advice: facts.advice,
     reason: facts.reason,
     blocked,
+    blockedGroup: why?.group ?? null,
+    missing: row.missing,
+    merged: (check?.merge.state ?? row.merge.state) === "merged" && !check?.unmerged,
+    branchDeletable: check?.branchDeletable === true,
+    onRemote: facts.onRemote,
+    pullRequest: facts.pullRequest ? { number: facts.pullRequest.number, state: facts.pullRequest.state } : null,
     ignored: check?.localWork?.ignored ?? [],
     unmergedCommits: check?.unmerged?.ahead ?? 0,
     remote: {
@@ -526,13 +558,23 @@ export async function removeForAgent(
       branch: null,
       reason: "Not a worktree of a repository behind your workspaces, or the main checkout, which is never removed.",
     }));
+  // The agent learns how many of its rows the user could never tick, so it
+  // does not ask for them again as if the user had left them out.
+  const blockedBeforeAsking = items.filter((entry) => entry.item.blocked !== null).length;
+  const counted = (result: WorktreeCleanupAgentResult): WorktreeCleanupAgentResult => ({
+    ...result,
+    blockedBeforeAsking,
+    note: blockedBeforeAsking
+      ? `${result.note} ${blockedBeforeAsking} of ${items.length} could not be removed before the user was asked; skipped says why for each.`
+      : result.note,
+  });
   if (!items.some((entry) => entry.item.blocked === null)) {
     for (const { item } of items) skipped.push({ repoRoot: item.repoRoot, path: item.path, branch: item.branch, reason: item.blocked ?? "" });
-    return { ...emptyResult("nothing-to-remove", "Nothing asked for can be removed, so the user was not asked."), skipped };
+    return counted({ ...emptyResult("nothing-to-remove", "Nothing asked for can be removed, so the user was not asked."), skipped });
   }
 
-  const answer = await ask({ agent: context.agent, items: items.map((entry) => entry.item) });
-  const unanswered = (status: "declined" | "timeout" | "no-window", note: string): WorktreeCleanupAgentResult => ({
+  const answer = await ask({ agent: context.agent, reason: agentReasonLine(input.reason), items: items.map((entry) => entry.item) });
+  const unanswered = (status: "declined" | "timeout" | "no-window", note: string): WorktreeCleanupAgentResult => counted({
     ...emptyResult(status, note),
     skipped: [
       ...skipped,
@@ -562,7 +604,7 @@ export async function removeForAgent(
       chosen.push({ facts, item, deleteRemoteBranch: decision.deleteRemoteBranch && item.remote.offered });
     }
   }
-  if (!chosen.length) return { ...emptyResult("done", "The user approved nothing. Nothing was removed."), skipped };
+  if (!chosen.length) return counted({ ...emptyResult("done", "The user approved nothing. Nothing was removed."), skipped });
 
   const result = await removeCleanupWorktrees(
     deps.cleanup,
@@ -617,7 +659,7 @@ export async function removeForAgent(
     remoteBranches.push({ ...base, ...(await deleteRemote(deps, outcome.repoRoot, remote, branch, pick.facts.remoteTip)) });
   }
   const freed = removed.reduce((total, entry) => total + (entry.reclaimedBytes ?? 0), 0);
-  return {
+  return counted({
     ok: true,
     status: "done",
     removed,
@@ -626,7 +668,7 @@ export async function removeForAgent(
     outcomes: result.outcomes,
     keptBranches: result.keptBranches,
     note: `${removed.length} removed${freed ? `, ${formatBytes(freed)} freed` : ""}, ${skipped.length} skipped.`,
-  };
+  });
 }
 
 async function deleteRemote(

@@ -386,6 +386,8 @@ export interface AgentWorktreeCleanupCall {
   staleDays?: number;
   items?: Array<{ path: string; deleteRemoteBranch?: boolean }>;
   deleteRemoteBranch?: boolean;
+  /** The agent's line for the user, shown above the list. */
+  reason?: string;
   caller: WorktreeCaller;
   agent: { client: string; workspaceName: string | null };
 }
@@ -407,7 +409,12 @@ export async function runAgentWorktreeCleanup(
   try {
     const result = await tool.removeForAgent(
       agentDependencies,
-      { items: call.items ?? [], deleteRemoteBranch: call.deleteRemoteBranch, staleDays: call.staleDays },
+      {
+        items: call.items ?? [],
+        deleteRemoteBranch: call.deleteRemoteBranch,
+        staleDays: call.staleDays,
+        ...(call.reason !== undefined ? { reason: call.reason } : {}),
+      },
       { caller: call.caller, agent: call.agent },
       askInWindow(finished, options.approvalTimeoutMs ?? APPROVAL_TIMEOUT_MS),
     );
