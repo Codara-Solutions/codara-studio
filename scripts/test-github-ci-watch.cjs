@@ -1150,6 +1150,32 @@ test("readRepositoryPullRequests answers each row as soon as its checks are read
   assert.deepEqual(heard.map(([cwd]) => cwd), ["/feat/fast", "/feat/slow"]);
 });
 
+test("readRepositoryPullRequests reads open checks while the query for the other branches runs", async ({ mod }) => {
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  const reader = {
+    get: async (url) => {
+      if (url.includes("pulls?state=open")) {
+        return { value: [{ number: 1, state: "open", draft: false, merged_at: null, title: "PR 1", html_url: "https://github.com/acme/widgets/pull/1", head: { sha: HEAD_A, label: "acme:feat/open" } }] };
+      }
+      if (url.includes("/check-runs")) return { value: { check_runs: [run("build", "completed", "success")] } };
+      return { value: { statuses: [] } };
+    },
+    graphql: async () => {
+      await held;
+      return { data: { repository: { b0: { nodes: [] }, parent: null } } };
+    },
+  };
+  const item = (branch) => ({ cwd: `/${branch}`, refs: { key: "k", host: "github.com", repository: "acme/widgets", branch } });
+  const heard = [];
+  const reading = mod.readRepositoryPullRequests(reader, [item("feat/quiet"), item("feat/open")], undefined, (cwd) => heard.push(cwd));
+  for (let i = 0; i < 20; i += 1) await Promise.resolve();
+  assert.deepEqual(heard, ["/feat/open"], "the open one is answered while the query runs");
+  release();
+  await reading;
+  assert.deepEqual(heard, ["/feat/open", "/feat/quiet"]);
+});
+
 test("a repository's rows apply as soon as its read is back, whatever another repository does", async ({ mod }) => {
   const rows = [ws("ws-slow", "/slow"), ws("ws-fast", "/fast")];
   let release;

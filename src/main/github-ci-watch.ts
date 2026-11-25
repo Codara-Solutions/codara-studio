@@ -1023,32 +1023,37 @@ export async function readRepositoryPullRequests(
     );
   const pulls = new Map(items.map(({ refs }) => [refs.branch, openPull(refs.branch)]));
   const rest = [...new Set(items.map(({ refs }) => refs.branch).filter((branch) => !pulls.get(branch)))];
-  let settled = new Map<string, ReturnType<typeof parseRestPullRequest>>();
-  let refused: Error | null = null;
-  if (rest.length && reader.graphql) {
-    // A refused query errs its rows, which wait out the error backoff, rather
-    // than asking each branch alone.
-    settled = await branchesPulls(reader as Parameters<typeof branchesPulls>[0], repository, rest).catch((cause) => {
-      refused = failure(cause);
-      return settled;
-    });
-  }
+  // Asked while the open ones' checks are read. A refused query errs its
+  // rows, which wait out the error backoff, rather than asking each branch
+  // alone.
+  const none = new Map<string, ReturnType<typeof parseRestPullRequest>>();
+  const settled: Promise<Map<string, ReturnType<typeof parseRestPullRequest>> | Error> =
+    rest.length && reader.graphql
+      ? branchesPulls(reader as Parameters<typeof branchesPulls>[0], repository, rest).catch((cause: unknown) => failure(cause))
+      : Promise.resolve(none);
   const readRow = async ({ cwd, refs }: { cwd: string; refs: CiLocalRefs }): Promise<void> => {
     try {
       let pull = pulls.get(refs.branch) ?? null;
-      if (!pull && refused) return settle(cwd, refused);
-      if (!pull) pull = settled.has(refs.branch) ? settled.get(refs.branch)! : await branchPull(reader, refs);
+      if (!pull) {
+        const known = await settled;
+        if (known instanceof Error) return settle(cwd, known);
+        pull = known.has(refs.branch) ? known.get(refs.branch)! : await branchPull(reader, refs);
+      }
       settle(cwd, pull ? await withChecks(reader, pull) : null);
     } catch (cause) {
       settle(cwd, failure(cause));
     }
   };
-  // Each row as soon as its checks are read: a slow one holds up no other.
+  // Open ones first, each answered as soon as its checks are read: a slow
+  // read holds up no other row.
+  const queue = [...items].sort((a, b) => Number(!pulls.get(a.refs.branch)) - Number(!pulls.get(b.refs.branch)));
   let next = 0;
   const worker = async (): Promise<void> => {
-    while (next < items.length) await readRow(items[next++]);
+    while (next < queue.length) await readRow(queue[next++]);
   };
-  await Promise.all(Array.from({ length: Math.min(CHECK_READS_AT_ONCE, items.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(CHECK_READS_AT_ONCE, queue.length) }, worker));
+  // A query nobody waited on (every row open) is still settled before returning.
+  await settled;
   return answers;
 }
 

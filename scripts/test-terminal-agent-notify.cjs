@@ -1491,7 +1491,7 @@ async function main() {
   // The worktree idle clock: a finished turn is not "now", and it outlives
   // its pane, found by workspace or by the folder it ran in.
   const inProgress = (workspaceId) => workspaceId === "ws-progress";
-  const inTree = (_workspaceId, cwds) => cwds.includes("/work/tree");
+  const inTree = (_workspaceId, cwd) => cwd === "/work/tree";
   const endedAt = mod.terminalAgentLastTurnAt(inProgress);
   check("idle clock: a finished turn is when it was", typeof endedAt === "number" && endedAt <= Date.now());
   await sleep(60_000);
@@ -1517,6 +1517,42 @@ async function main() {
   mod.syncTerminalNotifyPanes({ workspaceId: "ws-closing", panes: [] });
   await sleep(60_000);
   check("idle clock: a pane closed mid-turn ends the turn at the close", mod.terminalAgentLastTurnAt(inClosing) === closedAt);
+
+  // Each folder keeps its own time: a later turn in another folder of the
+  // same pane does not refresh the first; the agent's reported folder wins.
+  T.cwds.set("mover", "/work/a");
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-mover", panes: [
+    { paneId: "mover", tabId: "tm", tabTitle: "claude", excluded: false, runtimeHint: "claude" },
+  ] });
+  const shortTurn = async (line) => {
+    mod.noteTerminalUserInput("mover", `${line}\r`);
+    feed("mover", "\x1b]9;4;1;10\x07");
+    await sleep(1500);
+    feed("mover", "\x1b]9;4;0\x07");
+    await sleep(1500);
+  };
+  const folder = (dir) => mod.terminalAgentLastTurnAt((_workspaceId, cwd) => cwd === dir);
+  await shortTurn("first");
+  const firstEnd = folder("/work/a");
+  check("idle clock: a turn is credited to its folder", typeof firstEnd === "number" && firstEnd < Date.now());
+  await sleep(60_000);
+  T.cwds.set("mover", "/work/b");
+  await shortTurn("second");
+  check("idle clock: a turn in another folder leaves the first folder's time", folder("/work/a") === firstEnd && folder("/work/b") > firstEnd);
+  T.sessions = new Map([["mover", { cwd: "/work/c" }]]);
+  await sleep(60_000);
+  await shortTurn("third");
+  check("idle clock: the folder the agent reported wins", folder("/work/c") > folder("/work/b"));
+  T.sessions = new Map();
+  // A prompt at startup, before any turn, is no work yet.
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-prompt", panes: [
+    { paneId: "prompt", tabId: "tq", tabTitle: "claude", excluded: false, runtimeHint: "claude" },
+  ] });
+  feed("prompt", "Do you trust the files in this folder?\r\n❯ 1. Yes, proceed\r\n  2. No, exit\r\n\r\nEnter to confirm · Esc to exit");
+  await sleep(500);
+  const promptChip = [...T.chips].reverse().find((chip) => chip.paneId === "prompt");
+  check("idle clock: the startup prompt shows as blocked", promptChip?.state === "blocked");
+  check("idle clock: a startup prompt is not a turn", mod.terminalAgentLastTurnAt((id) => id === "ws-prompt") === null);
 
   mod.disposeAllTerminalAgentWatchers();
   check("explicit watcher disposal detaches every tap", T.taps.size === 0);

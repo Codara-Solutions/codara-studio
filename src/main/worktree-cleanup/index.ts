@@ -118,7 +118,7 @@ function deps(invalidateGitCache: (cwd: string) => void): WorktreeCleanupDeps {
     lastAgentTurnAt: (workspaceIds, dirs) => {
       const ids = new Set(workspaceIds);
       const inside = (cwd: string | null) => !!cwd && dirs.some((dir) => cwd === dir || cwd.startsWith(dir.endsWith(sep) ? dir : `${dir}${sep}`));
-      return terminalAgentLastTurnAt((workspaceId, cwds) => ids.has(workspaceId) || cwds.some(inside));
+      return terminalAgentLastTurnAt((workspaceId, cwd) => ids.has(workspaceId) || inside(cwd));
     },
     archiveRoot: () => worktreeArchiveRoot(codaraHome()),
     leftovers: systemLeftovers({ appPid: process.pid, sessionPids: () => pty.sessionPids() }),
