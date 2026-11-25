@@ -66,14 +66,16 @@ function fakeSystem() {
       if (system.unreadable.has(pid)) throw new Error("EACCES");
       const entry = procs.get(pid);
       if (!entry) return null;
-      return { ...entry, argv: entry.argv ?? entry.command.split(/\s+/), argvExact: entry.argvExact ?? true };
+      return { ...entry, argv: entry.argv ?? entry.command.split(/\s+/), argvExact: entry.argvExact ?? true, argvKey: entry.argvKey ?? entry.command };
     },
     unreadable: new Set(),
     table: async () => [...procs.values()].map(({ pid, parentPid }) => ({ pid, parentPid })),
-    // As the real one: sent only while the pid still has that start.
-    signal: (pid, signal, start) => {
+    // As the real one: sent only while, at that moment, it has that start and
+    // those arguments and works inside the worktree.
+    signal: (pid, signal, expect) => {
       const entry = procs.get(pid);
-      if (!entry || entry.start !== start) return false;
+      const inside = (cwd, dir) => typeof cwd === "string" && (cwd === dir || cwd.startsWith(`${dir}/`));
+      if (!entry || entry.start !== expect.start || (entry.argvKey ?? entry.command) !== expect.commandKey || !inside(entry.cwd, expect.real)) return false;
       signals.push([pid, signal]);
       if (!(entry.unkillable || (signal === "SIGTERM" && entry.ignoresTerm))) procs.delete(pid);
       return true;
@@ -160,15 +162,38 @@ async function main() {
       assert.notEqual(leftovers.leftoverFingerprint(W, [now]), asked, "a yes to before.js is not a yes to after.js");
     });
 
+    await check("arguments or folder that change at the signal itself stop it", async () => {
+      for (const change of [(entry) => (entry.argvKey = "node other.js"), (entry) => (entry.cwd = "/elsewhere")]) {
+        const { system, procs, signals, add } = fakeSystem();
+        add(513, { cwd: W });
+        const [entry] = await leftovers.describeLeftovers(system, W, [513], new Map());
+        const send = system.signal;
+        system.signal = (pid, signal, expect) => {
+          change(procs.get(pid));
+          return send(pid, signal, expect);
+        };
+        await leftovers.stopLeftovers(system, W, [entry]);
+        assert.deepEqual(signals, []);
+      }
+    });
+
+    await check("the arguments are bound as raw bytes", async () => {
+      // Both decode to the same text ("n" and a replacement character).
+      const a = Buffer.from([0x6e, 0xff]);
+      const b = Buffer.from([0x6e, 0xfe]);
+      assert.equal(a.toString("utf8"), b.toString("utf8"));
+      assert.notEqual(leftovers.argvKeyOf(a), leftovers.argvKeyOf(b));
+    });
+
     await check("a pid that changes hands at the signal itself is not signalled", async () => {
       const { system, procs, signals, add } = fakeSystem();
       add(512, { cwd: W });
       const [entry] = await leftovers.describeLeftovers(system, W, [512], new Map());
       // Every read before agrees; the start differs only at delivery.
       const realSignal = system.signal;
-      system.signal = (pid, signal, start) => {
+      system.signal = (pid, signal, expect) => {
         procs.get(pid).start = "reused";
-        return realSignal(pid, signal, start);
+        return realSignal(pid, signal, expect);
       };
       await leftovers.stopLeftovers(system, W, [entry]);
       assert.deepEqual(signals, []);
@@ -189,8 +214,8 @@ async function main() {
       add(540, { cwd: W, ignoresTerm: true });
       const list = await leftovers.describeLeftovers(system, W, [540], new Map());
       const realSignal = system.signal;
-      system.signal = (pid, signal, start) => {
-        const sent = realSignal(pid, signal, start);
+      system.signal = (pid, signal, expect) => {
+        const sent = realSignal(pid, signal, expect);
         system.unreadable.add(pid);
         return sent;
       };
@@ -202,8 +227,8 @@ async function main() {
       second.add(542, { cwd: W, ignoresTerm: true });
       const listed = await leftovers.describeLeftovers(second.system, W, [542], new Map());
       const sendTerm = second.system.signal;
-      second.system.signal = (pid, signal, start) => {
-        const sent = sendTerm(pid, signal, start);
+      second.system.signal = (pid, signal, expect) => {
+        const sent = sendTerm(pid, signal, expect);
         second.procs.get(pid).cwd = null;
         return sent;
       };
@@ -293,7 +318,7 @@ async function main() {
       terminals: [],
       now: new Date(Date.now() + HOUR),
     };
-    const isUnder = (candidate, dir) => candidate === dir || candidate.startsWith(`${dir}/`);
+    const isUnder = (candidate, dir) => typeof candidate === "string" && (candidate === dir || candidate.startsWith(`${dir}/`));
     const deps = {
       loadState: async () => structuredClone(h.state),
       updateState: async (mutator) => {
@@ -417,6 +442,25 @@ async function main() {
       }
     });
 
+    await check("a process whose folder cannot be placed keeps the worktree, named, and is not signalled", async () => {
+      const unplaced = merged("unplaced");
+      fake.add(6363, { cwd: null, command: "node server.js" });
+      const original = deps.processesUnderCwds;
+      deps.processesUnderCwds = async (dirs) =>
+        Object.assign(await original(dirs), { cwdUnknown: new Map(dirs.map((dir) => [dir, [{ pid: 6363, command: "node server.js" }]])) });
+      const signalled = fake.signals.length;
+      try {
+        const result = await click("unplaced");
+        assert.equal(result.status, "refused");
+        assert.equal(result.message, "node server.js (pid 6363) runs in it, and its folder cannot be read.");
+        assert.equal(fake.signals.length, signalled);
+        assert.equal(fs.existsSync(unplaced), true);
+      } finally {
+        deps.processesUnderCwds = original;
+        fake.procs.delete(6363);
+      }
+    });
+
     await check("an ignored file and a leftover are asked about together, and both answers are needed", async () => {
       const both = merged("both");
       fs.writeFileSync(path.join(both, ".env"), "LOCAL=1\n");
@@ -501,8 +545,12 @@ async function main() {
         assert.equal(list.length, 1);
         assert.equal(list[0].program, process.platform === "linux" ? "node server.js" : "node");
         assert.equal(list[0].blocked, undefined);
-        // Bound to its start at the signal itself: another start sends nothing.
-        assert.equal(real.signal(child.pid, "SIGTERM", "not-its-start"), false);
+        // Read again at the signal itself: another start, other arguments or
+        // another folder sends nothing.
+        const bound = { start: list[0].start, commandKey: list[0].commandKey, real: dir };
+        for (const wrong of [{ start: "not-its-start" }, { commandKey: "not-its-arguments" }, { real: path.join(scratch, "elsewhere") }]) {
+          assert.equal(real.signal(child.pid, "SIGTERM", { ...bound, ...wrong }), false, JSON.stringify(wrong));
+        }
         await new Promise((done) => setTimeout(done, 100));
         assert.equal(child.exitCode, null);
         assert.equal(child.signalCode, null);
@@ -511,6 +559,31 @@ async function main() {
         await exited;
         child = null;
       });
+
+      if (process.platform === "linux") {
+        await check("a process whose folder was deleted is unknown, never inside a look-alike", async () => {
+          const gone = fs.mkdtempSync(path.join(scratch, "old-"));
+          const script = path.join(scratch, "server.js");
+          child = spawn(process.execPath, [script], { cwd: gone, detached: true, stdio: "ignore" });
+          await new Promise((done) => setTimeout(done, 300));
+          fs.rmdirSync(gone);
+          // A real folder whose name is what the kernel prints for the deleted one.
+          const lookalike = `${gone} (deleted)`;
+          fs.mkdirSync(lookalike);
+          const facts = await real.facts(child.pid);
+          assert.equal(facts.cwd, null, "unknown, not the look-alike");
+          const [entry] = await leftovers.describeLeftovers(real, lookalike, [child.pid], new Map());
+          assert.equal(entry.blocked, "its folder cannot be read");
+          const scan = await agent.scanProcessesUnderCwds([lookalike], { appPid: 0x3ffffe, sessionPids: [] });
+          assert.equal(scan.get(lookalike).some((use) => use.pid === child.pid), false, "not placed inside");
+          assert.equal(scan.cwdUnknown?.get(lookalike)?.some((use) => use.pid === child.pid), true, "kept as unknown");
+          const pid = child.pid;
+          const exited = new Promise((done) => child.once("exit", done));
+          process.kill(pid, "SIGKILL");
+          await exited;
+          child = null;
+        });
+      }
     }
   } finally {
     if (child?.pid) {

@@ -1,22 +1,23 @@
 import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { promises as fsp, readFileSync } from "node:fs";
+import { promises as fsp, readFileSync, readlinkSync, statSync } from "node:fs";
 import { basename } from "node:path";
 import type { WorktreeLeftoverProcess } from "@shared/worktree-cleanup";
-import { cleanText } from "../agent-worktrees";
+import { cleanText, linuxCwdOf } from "../agent-worktrees";
 import { psTimeEnvironment, readProcFile } from "../owned-process-tree";
 
 // Processes left running in a merged worktree (a dev server an agent started
 // and never stopped), which the rail's Clean up names and, on a yes, stops.
 // The rule: a signal goes only to a process the user confirmed, each by its
 // own pid (never a group), and only while it is that process: the same pid,
-// start time and argument list the question showed (read on both sides of
-// its folder, and on Linux the start read again in the same instant as the
-// signal), still working inside the worktree. Anything that cannot be read
-// is unknown, never "gone": nothing is signalled for it and the worktree
-// stays. Codara's own processes, the shells of terminal panes and what the
-// user runs in a pane are never stopped: they are named, and the worktree
-// stays. Only a click stops anything; the unattended mode never does.
+// start time and raw argument bytes the question showed, still working
+// inside the worktree, all read again in the same tick as the signal
+// (linuxSameNow, macSameNow, with the window they leave). Anything that
+// cannot be read is unknown, never "gone": nothing is signalled for it and
+// the worktree stays. Codara's own processes, the shells of terminal panes
+// and what the user runs in a pane are never stopped: they are named, and
+// the worktree stays. Only a click stops anything; the unattended mode
+// never does.
 
 // Real POSIX paths as the system gives them, compared exactly: a backslash
 // is part of a name here, and a case-sensitive volume has "a" and "A".
@@ -35,6 +36,8 @@ export interface ProcessFacts {
   argv: string[];
   /** False when the system gives them only flattened into one line (macOS). */
   argvExact: boolean;
+  /** Its arguments as the raw bytes the system gives (argvKeyOf): what a confirmation binds. */
+  argvKey: string;
   startedAtMs: number | null;
   /** Null when it cannot be read. */
   cwd: string | null;
@@ -52,10 +55,11 @@ export interface LeftoverSystem {
   /** Every process's pid and parent; null when they cannot be listed. */
   table(): Promise<ReadonlyArray<{ pid: number; parentPid: number }> | null>;
   /**
-   * Signals `pid` only if it still started at `start`, checked as close to
-   * the signal as the system allows; false when it was not sent.
+   * Signals `pid` only if, read again in the same tick as the signal with
+   * nothing awaited in between, it still has that start and raw arguments
+   * and works inside `real`; false when it was not sent.
    */
-  signal(pid: number, signal: "SIGTERM" | "SIGKILL", start: string): boolean;
+  signal(pid: number, signal: "SIGTERM" | "SIGKILL", expect: { start: string; commandKey: string; real: string }): boolean;
   wait(ms: number): Promise<void>;
   now(): number;
   /** How long SIGTERM gets before SIGKILL. */
@@ -102,8 +106,9 @@ export function programOf(argv: readonly string[], exact = true): string {
   return name;
 }
 
-function keyOf(argv: readonly string[]): string {
-  return createHash("sha256").update(argv.join("\0")).digest("hex").slice(0, 16);
+/** The raw argument bytes, hashed: no decoding can make two lists look alike. */
+export function argvKeyOf(raw: Buffer | string): string {
+  return createHash("sha256").update(raw).digest("hex").slice(0, 32);
 }
 
 function isAgentCommand(command: string): boolean {
@@ -176,7 +181,7 @@ export async function describeLeftovers(
     out.push({
       pid,
       start: facts.start,
-      commandKey: keyOf(facts.argv),
+      commandKey: facts.argvKey,
       program: programOf(facts.argv, facts.argvExact),
       ...(runningMs !== undefined ? { runningMs } : {}),
       ...(startedBy ? { startedBy } : {}),
@@ -226,7 +231,7 @@ export async function stopLeftovers(
     } catch {
       return "unknown";
     }
-    if (!facts || facts.zombie || facts.start !== entry.start || keyOf(facts.argv) !== entry.commandKey) return "gone";
+    if (!facts || facts.zombie || facts.start !== entry.start || facts.argvKey !== entry.commandKey) return "gone";
     // Alive and the same, but where it works cannot be read: unknown.
     if (facts.cwd === null) return "unknown";
     return facts;
@@ -236,7 +241,7 @@ export async function stopLeftovers(
     for (const entry of targets) {
       if (!inside(await look(entry))) continue;
       try {
-        system.signal(entry.pid, signal, entry.start);
+        system.signal(entry.pid, signal, { start: entry.start, commandKey: entry.commandKey, real });
       } catch {
         /* Gone between the check and the signal. */
       }
@@ -322,8 +327,8 @@ async function linuxStatOf(pid: number): Promise<NonNullable<ReturnType<typeof l
 async function linuxFacts(pid: number): Promise<ProcessFacts | null> {
   const before = await linuxStatOf(pid);
   if (!before) return null;
-  const [cwd, argv, boot] = await Promise.all([
-    fsp.readlink(`/proc/${pid}/cwd`).catch(() => null),
+  const [placed, argv, boot] = await Promise.all([
+    linuxCwdOf(pid).catch(() => null),
     // Unreadable arguments make it unknown, never another process.
     readProcFile(`/proc/${pid}/cmdline`),
     linuxBoot(),
@@ -339,12 +344,13 @@ async function linuxFacts(pid: number): Promise<ProcessFacts | null> {
     parentPid: after.parentPid,
     start: after.ticks,
     startedAtMs: boot === null ? null : (boot + Number(after.ticks) / CLOCK_TICKS_PER_SECOND) * 1000,
-    // As the kernel gives it: a folder removed since reads "<path> (deleted)",
-    // which is not inside anything, and a real name may end the same way.
-    cwd,
+    // Only when the link's text names that very folder (device and inode):
+    // a folder deleted since, whatever its text says, is unknown.
+    cwd: placed && "cwd" in placed ? placed.cwd : null,
     command: words.length ? words.join(" ") : `[${after.name}]`,
     argv: words.length ? words : [`[${after.name}]`],
     argvExact: true,
+    argvKey: argvKeyOf(argv),
     zombie: after.state === "Z" || after.state === "X",
   };
 }
@@ -399,6 +405,8 @@ async function macFacts(pid: number): Promise<ProcessFacts | null> {
     command: after.command,
     argv: after.command.split(/\s+/).filter(Boolean),
     argvExact: false,
+    // The closest to raw macOS gives without native code: ps's one line.
+    argvKey: argvKeyOf(after.command),
     zombie: after.state.includes("Z"),
   };
 }
@@ -414,6 +422,50 @@ async function macTable(): Promise<Array<{ pid: number; parentPid: number }> | n
   return rows.length ? rows : null;
 }
 
+// Right before a signal, synchronously: the same start, the same raw
+// arguments, and a working directory inside the worktree that its link's
+// text truly names (same device and inode). Any read that fails is "no".
+//
+// What stays open without a pidfd (Node has none): the process can exit and
+// its pid be taken by another between these reads and kill(), a window of a
+// few system calls in which the pid space would have to wrap around. Linux
+// binds to the start in clock ticks plus the raw arguments plus the folder;
+// macOS to the start to the second plus ps's argument line plus the folder.
+function linuxSameNow(pid: number, expect: { start: string; commandKey: string; real: string }): boolean {
+  try {
+    const stat = linuxStat(readFileSync(`/proc/${pid}/stat`, "utf8"));
+    if (!stat || stat.ticks !== expect.start || stat.state === "Z" || stat.state === "X") return false;
+    if (argvKeyOf(readFileSync(`/proc/${pid}/cmdline`)) !== expect.commandKey) return false;
+    const text = readlinkSync(`/proc/${pid}/cwd`);
+    const here = statSync(`/proc/${pid}/cwd`);
+    const named = statSync(text);
+    return named.dev === here.dev && named.ino === here.ino && isAtOrUnder(text, expect.real);
+  } catch {
+    return false;
+  }
+}
+
+const PS_START_ARGS = /^\s*(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s?(.*)$/;
+
+function macSameNow(pid: number, expect: { start: string; commandKey: string; real: string }): boolean {
+  try {
+    const sync = (file: string, args: string[]) =>
+      execFileSync(file, args, { env: psTimeEnvironment(), timeout: 2_000, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    const match = PS_START_ARGS.exec(sync("ps", ["-o", "lstart=,args=", "-p", String(pid)]).split(/\r?\n/)[0] ?? "");
+    if (!match || match[1].replace(/\s+/g, " ") !== expect.start || argvKeyOf(match[2] ?? "") !== expect.commandKey) return false;
+    let listed = "";
+    try {
+      listed = sync("/usr/sbin/lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"]);
+    } catch (err) {
+      listed = String((err as { stdout?: unknown }).stdout ?? "");
+    }
+    const cwd = listed.split(/\r?\n/).find((line) => line.startsWith("n/"))?.slice(1);
+    return cwd !== undefined && isAtOrUnder(cwd, expect.real);
+  } catch {
+    return false;
+  }
+}
+
 /** The real system on Linux and macOS; null elsewhere, where a process inside keeps holding the worktree. */
 export function systemLeftovers(options: { appPid: number; sessionPids: () => readonly number[] }): LeftoverSystem | undefined {
   const linux = process.platform === "linux";
@@ -423,30 +475,10 @@ export function systemLeftovers(options: { appPid: number; sessionPids: () => re
     sessionPids: options.sessionPids,
     facts: linux ? linuxFacts : macFacts,
     table: linux ? linuxTable : macTable,
-    signal: (pid, signal, start) => {
+    signal: (pid, signal, expect) => {
       // One process, never a group, init or Codara itself.
       if (!Number.isSafeInteger(pid) || pid <= 1 || pid === options.appPid) return false;
-      if (linux) {
-        // Read in the same instant as the signal, with nothing awaited in
-        // between: a pid freed and reused has a later start. (Node offers no
-        // pidfd to bind it closer.)
-        let now: ReturnType<typeof linuxStat>;
-        try {
-          now = linuxStat(readFileSync(`/proc/${pid}/stat`, "utf8"));
-        } catch {
-          return false;
-        }
-        if (!now || now.ticks !== start) return false;
-      } else {
-        // macOS: its start once more, just before the signal (to the second).
-        let now: string;
-        try {
-          now = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { env: psTimeEnvironment(), timeout: 2_000, encoding: "utf8" });
-        } catch {
-          return false;
-        }
-        if (now.trim().replace(/\s+/g, " ") !== start) return false;
-      }
+      if (!(linux ? linuxSameNow : macSameNow)(pid, expect)) return false;
       process.kill(pid, signal);
       return true;
     },

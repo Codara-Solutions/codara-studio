@@ -606,7 +606,10 @@ export async function usageOf(
   // when its pane's folder is in it, or its shell moved in with cd (seen by
   // the process scan only). It is named as that tab, not counted again
   // among the terminals or processes inside.
-  const found = ctx.processes?.get(real) ?? ctx.processes?.get(path) ?? [];
+  // With those whose folder could not be placed (Linux): a use all the same.
+  const placed = ctx.processes?.get(real) ?? ctx.processes?.get(path) ?? [];
+  const unplaced = ctx.processes?.cwdUnknown?.get(real) ?? ctx.processes?.cwdUnknown?.get(path) ?? [];
+  const found = [...placed, ...unplaced.filter((entry) => !placed.some((seen) => seen.pid === entry.pid))];
   let maker: WorktreeInUse | null = null;
   let makerPid: number | null = null;
   let makerPane: string | null = null;
