@@ -111,9 +111,16 @@ export function commandRunsAgent(command: string, runtime: AgentHibernationRunti
   return (name === "node" || name === "bun") && PACKAGE_PATHS[runtime].test(normalized);
 }
 
-/** A process that may be agy itself: an agy path segment, not a shell that names it. */
+// A path ending in agy (`/opt/bash tools/agy`): agy itself, whatever the
+// flattened listing's first word looks like.
+const AGY_PATH_RE = /[\\/]agy(?:\.exe)?(?=\s|$)/i;
+
+/**
+ * A process that may be agy itself: a path to agy, or an agy word in
+ * anything but a shell that typed it (`zsh -ic agy`).
+ */
 function mayBeAgy(command: string): boolean {
-  return MAYBE_AGY_RE.test(command) && !isShellProcess(command);
+  return AGY_PATH_RE.test(command) || (MAYBE_AGY_RE.test(command) && !isShellProcess(command));
 }
 
 function isHelperProcess(command: string): boolean {

@@ -773,8 +773,15 @@ async function decide(
     ) {
       return { ok: false, reason: "other-processes", detail: "the pane's processes changed while agy was checked" };
     }
+    // agy may have moved to another conversation during the re-census: the
+    // open conversation and flags again, for the same process.
+    const recheck = deps.antigravity
+      ? await deps.antigravity(census.agentPid, agentCommand, request.conversationId).catch(() => null)
+      : null;
+    if (!recheck) return { ok: false, reason: "conversation-unknown", detail: "agy could not be checked" };
+    if (!recheck.ok) return { ok: false, reason: recheck.reason, detail: recheck.detail };
     // agy's flags again, after the last await: a turn or a subagent that
-    // started during the re-census is seen here or after the stop.
+    // started during the re-check is seen here or after the stop.
     const still = deps.antigravityActivity?.(request.conversationId ?? "") ?? null;
     if (!still) return { ok: false, reason: "conversation-unknown", detail: "agy could not be checked" };
     if (!still.ok) return { ok: false, reason: still.reason, detail: still.detail };

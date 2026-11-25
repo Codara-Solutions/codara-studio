@@ -215,6 +215,12 @@ export async function antigravitySleepVerdict(
 // would let two agy processes write one conversation.
 export { MAYBE_AGY_RE };
 
+async function runsAgyBinary(pid: number): Promise<boolean> {
+  if (process.platform !== "linux") return false;
+  const exe = await readlink(`/proc/${pid}/exe`).catch(() => null);
+  return exe !== null && /^agy(?:\.exe)?$/i.test(basename(exe.replace(/ \(deleted\)$/, "")));
+}
+
 /**
  * Before a sleeping pane runs `agy --conversation <id>`: true when some agy
  * on this machine has that conversation open or agy marks it working, so a
@@ -224,16 +230,19 @@ export { MAYBE_AGY_RE };
 export async function antigravityConversationHeld(
   conversationId: string,
   activityOf: (id: string) => AntigravityConversationActivity | null | undefined = currentConversationActivity,
+  list: () => Promise<ReadonlyArray<{ pid: number; command: string }> | null> = () => listProcessesWithCommands(0),
 ): Promise<boolean | "missing" | null> {
   if (!isAntigravityConversationId(conversationId)) return null;
   const activity = activityOf(conversationId);
   if (activity === undefined || activity === null) return null;
   if (activity.busy) return true;
   if (!activity.known) return "missing";
-  const processes = await listProcessesWithCommands(0).catch(() => null);
+  const processes = await list().catch(() => null);
   if (!processes) return null;
   for (const proc of processes) {
-    if (!MAYBE_AGY_RE.test(proc.command)) continue;
+    // By name on its command line, or (Linux) by the program it runs: an
+    // agy started through a link named otherwise is still agy.
+    if (!MAYBE_AGY_RE.test(proc.command) && !(await runsAgyBinary(proc.pid))) continue;
     const open = await antigravityOpenConversations(proc.pid);
     if (!open) return null;
     if (open.includes(conversationId)) return true;

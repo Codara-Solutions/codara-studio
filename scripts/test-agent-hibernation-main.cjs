@@ -366,6 +366,18 @@ async function main() {
       "agent-busy",
       "a subagent is working",
     ],
+    [
+      "agy moving to another conversation during the re-census",
+      (t) => {
+        let lists = 0;
+        t.state.duringList = (state) => {
+          if (++lists === 2) state.open = ["conv-2"];
+        };
+      },
+      {},
+      "conversation-unknown",
+      "agy has another conversation open",
+    ],
     ["no last look at agy's flags", (t) => delete t.deps.antigravityActivity, {}, "conversation-unknown", "agy could not be checked"],
     ["no way to check agy at all", (t) => delete t.deps.antigravity, {}, "conversation-unknown", "agy could not be checked"],
   ];

@@ -263,6 +263,35 @@ async function main() {
     assert.deepEqual(presence.antigravityActivityVerdict("conv-x", () => ({ known: true, busy: null })), { ok: true });
     assert.equal(presence.antigravityActivityVerdict("conv-x", () => ({ known: true, busy: "subagent" })).detail, "a subagent is working");
     assert.equal(presence.antigravityActivityVerdict("continue", () => ({ known: true, busy: null })).ok, false);
+    if (process.platform === "linux") {
+      // Wake: an agy started through a link named otherwise still holds it.
+      const realHome = process.env.HOME;
+      const home = path.join(dir, "home-wake");
+      const store = path.join(home, ".gemini", "antigravity-cli", "presence");
+      const bin = path.join(dir, "wake-bin");
+      fs.mkdirSync(store, { recursive: true });
+      fs.mkdirSync(bin, { recursive: true });
+      fs.copyFileSync(require("node:child_process").execFileSync("sh", ["-c", "command -v sleep"], { encoding: "utf8" }).trim(), path.join(bin, "agy"));
+      fs.chmodSync(path.join(bin, "agy"), 0o755);
+      fs.symlinkSync(path.join(bin, "agy"), path.join(bin, "antigravity"));
+      const held = fs.openSync(path.join(store, "conv-w.lock"), "w");
+      const holder = require("node:child_process").spawn(path.join(bin, "antigravity"), ["30"], { stdio: ["ignore", held, "ignore"] });
+      fs.closeSync(held);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        process.env.HOME = home;
+        const listed = async () => [{ pid: holder.pid, command: `${path.join(bin, "antigravity")} 30` }];
+        assert.equal(
+          await presence.antigravityConversationHeld("conv-w", () => ({ known: true, busy: null }), listed),
+          true,
+          "an agy run through a link named otherwise was missed",
+        );
+        assert.equal(await presence.antigravityConversationHeld("conv-free", () => ({ known: true, busy: null }), listed), false);
+      } finally {
+        process.env.HOME = realHome;
+        holder.kill();
+      }
+    }
     // Wake: a conversation agy no longer lists is not free to reopen.
     assert.equal(await presence.antigravityConversationHeld("conv-x", () => ({ known: false, busy: null })), "missing");
     assert.equal(await presence.antigravityConversationHeld("conv-x", () => ({ known: true, busy: "subagent" })), true);
