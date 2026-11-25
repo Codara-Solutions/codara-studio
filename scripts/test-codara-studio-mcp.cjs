@@ -140,8 +140,10 @@ const RUN = { SPARK_RUN_ID: "run-roster" };
 // codara_session_relay, about 660, so a caller can ask the user to send a
 // session a message, and by 250 for its answer mode, about 230; studio and
 // execute by 600 for codara_feedback_send, about 560, so an agent can send
-// the user's feedback to Codara after they agree).
-const LIST_BUDGET = { studio: 40_000, run: 39_000, worker: 35_000, execute: 104_800, automation: 69_000 };
+// the user's feedback to Codara after they agree; studio and execute by 150 for
+// codara_worktree_cleanup's reason, about 105 after a shorter description,
+// so the removal dialog shows the rule the user approved).
+const LIST_BUDGET = { studio: 40_150, run: 39_000, worker: 35_000, execute: 104_950, automation: 69_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",

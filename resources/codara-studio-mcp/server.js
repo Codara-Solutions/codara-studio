@@ -705,7 +705,7 @@ const WORKTREE_TOOLS = [
   {
     name: "codara_worktree_cleanup",
     description:
-      "Every worktree of the user's repositories (not SSH) with size, activity, git, PR and remote branch, and a recommendation: safe to remove, review or keep. Scan, explain it to the user, then remove; the user approves in Codara.",
+      "Every worktree of the user's repositories (not SSH): size, activity, git, PR, remote branch, recommendation (safe to remove, review, keep). Scan, explain it, then remove with a reason; the user approves in Codara.",
     inputSchema: {
       type: "object",
       properties: {
@@ -714,7 +714,8 @@ const WORKTREE_TOOLS = [
         staleDays: { type: "number", description: "Default 14." },
         paths: { type: "array", items: { type: "string" } },
         deleteRemoteBranch: { type: "boolean", description: "Offer to delete merged remote branches." },
-        deleteRemoteBranchFor: { type: "array", items: { type: "string" }, description: "Only for these paths." },
+        deleteRemoteBranchFor: { type: "array", items: { type: "string" }, description: "Only these paths." },
+        reason: { type: "string", maxLength: 200, description: "remove: one line for the user: the rule they approved, what you recommend." },
       },
       additionalProperties: false,
     },

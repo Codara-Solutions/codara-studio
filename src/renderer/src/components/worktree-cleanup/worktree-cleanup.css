@@ -580,13 +580,104 @@
   margin: 0;
   flex: none;
 }
-/* A row that cannot be removed reads as such before anyone reaches for it. */
-.wtc-dialog--approval .wtc-review-item.is-blocked .wtc-review-head > input {
-  opacity: 0.35;
-  cursor: not-allowed;
+/* A row that cannot be removed has no checkbox and sits in the fold. */
+.wtc-dialog--approval .wtc-review-item.is-blocked .wtc-row-name {
+  color: var(--ink-dim);
 }
-.wtc-dialog--approval .wtc-review-item.is-blocked .wtc-review-head > label {
-  cursor: default;
+/* The agent's own words, quoted, so they never read as Codara's. */
+.wtc-agent-reason {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.wtc-agent-reason q {
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.wtc-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+}
+.wtc-approval-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.wtc-approval-count {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-dim);
+}
+.wtc-review-effect {
+  font-size: 12px;
+  color: var(--ink);
+  line-height: 1.45;
+}
+.wtc-fold {
+  display: grid;
+  gap: 8px;
+}
+.wtc-fold-toggle {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-dim);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.wtc-fold-toggle:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.wtc-fold-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.wtc-fold-toggle > span:nth-of-type(1) {
+  flex: none;
+  font-weight: 600;
+}
+.wtc-fold-hint {
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wtc-fold-chevron {
+  flex: none;
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+.wtc-fold-chevron.is-open {
+  transform: rotate(90deg);
+}
+.wtc-fold-body {
+  display: grid;
+  gap: 10px;
+}
+.wtc-fold-group {
+  display: grid;
+  gap: 6px;
+}
+.wtc-fold-group h3 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
   color: var(--ink-dim);
 }
 
