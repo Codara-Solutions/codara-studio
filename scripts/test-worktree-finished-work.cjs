@@ -297,7 +297,7 @@ async function main() {
       const attributes = path.join(scratch, "global-attributes");
       const plain = fs.readFileSync(gitConfig, "utf8");
       fs.writeFileSync(attributes, "/main.tf filter=spy\n");
-      fs.writeFileSync(gitConfig, `${plain}[core]\n\tattributesFile = ${attributes}\n[filter "spy"]\n\tclean = sh -c 'touch ${marker}; cat'\n`);
+      fs.writeFileSync(gitConfig, `${plain}[core]\n\tattributesFile = ${attributes}\n[filter "spy"]\n\tclean = \"sh -c 'touch ${marker}; cat'\"\n`);
       try {
         // A changed stat makes git read the file again, through its filter.
         const later = new Date(Date.now() + 5_000);
