@@ -56,6 +56,14 @@ export function normalizeAgentHibernationWorkspaces(value: unknown): Record<stri
   return out;
 }
 
+/**
+ * A command with an agy path segment, the listing's unquoted spaces and all
+ * (`/opt/Agent Tools/agy --continue`). Wide on purpose: it picks processes
+ * that might be agy, where a false match only costs a look or keeps a pane
+ * awake.
+ */
+export const MAYBE_AGY_RE = /(?:^|[\s/\\])agy(?:\.exe)?(?=\s|$)/i;
+
 export function isAgentHibernationRuntime(value: unknown): value is AgentHibernationRuntime {
   return value === "claude" || value === "codex" || value === "grok" || value === "pi" || value === "antigravity";
 }

@@ -743,6 +743,19 @@ async function decide(
       : null;
     if (!verdict) return { ok: false, reason: "conversation-unknown", detail: "agy could not be checked" };
     if (!verdict.ok) return { ok: false, reason: verdict.reason, detail: verdict.detail };
+    // The proof took time: the processes the stop will end must still be
+    // the ones the census passed, with the agy it read, and no other agy.
+    const again = await deps.listProcesses();
+    const recount = again ? classifyPaneProcessTree(again, first.session.pid, request.runtime, { terminalPids }) : null;
+    const passed = new Set(census.pids);
+    if (
+      !recount?.ok ||
+      recount.agentPid !== census.agentPid ||
+      recount.pids.length !== passed.size ||
+      recount.pids.some((pid) => !passed.has(pid))
+    ) {
+      return { ok: false, reason: "other-processes", detail: "the pane's processes changed while agy was checked" };
+    }
   }
 
   // The listing took time. Judge again from fresh state, and fence the stop

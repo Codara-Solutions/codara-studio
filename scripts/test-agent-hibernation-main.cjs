@@ -329,6 +329,20 @@ async function main() {
     ["agy in print mode", (t) => (t.state.processes[1].command = "agy -p summarize"), {}, "other-processes", "agy is not an interactive session"],
     ["agy with a remote connection", (t) => (t.state.processes[1].command = "agy --remote-control"), {}, "other-processes", "agy is not an interactive session"],
     ["a second agy under the first", (t) => t.state.processes.push({ pid: 105, parentPid: 101, startMs: NOW - 200 * MIN + 1_000, command: "agy -r conv-9" }), {}, "other-processes"],
+    [
+      "the pane's processes changing while agy was checked",
+      (t) => {
+        const checked = t.deps.antigravity;
+        t.deps.antigravity = async (...args) => {
+          const verdict = await checked(...args);
+          t.state.processes = [...t.state.processes, { pid: 106, parentPid: 101, startMs: NOW - 200 * MIN + 1_500, command: "/opt/Agent Tools/agy" }];
+          return verdict;
+        };
+      },
+      {},
+      "other-processes",
+      "the pane's processes changed while agy was checked",
+    ],
     ["no way to check agy at all", (t) => delete t.deps.antigravity, {}, "conversation-unknown", "agy could not be checked"],
   ];
   for (const [name, mutate, extra, reason, detail] of agyRefusals) {

@@ -198,6 +198,12 @@ async function main() {
     );
     assert.deepEqual(await presence.linuxOpenFilePaths(9, procFs([["0", "1"], "gone"], { 0: lock("a") })), [], "exited mid-scan holds nothing");
     assert.deepEqual(await presence.linuxOpenFilePaths(9, procFs(["gone"], {})), []);
+    let pass = 0;
+    const reused = {
+      readdir: async () => ["0", "1"],
+      readlink: async (p) => (p.endsWith("/1") ? (pass++ < 1 ? "/dev/null" : lock("b")) : lock("a")),
+    };
+    assert.equal(await presence.linuxOpenFilePaths(9, reused), null, "a descriptor number reused for a second lock: no proof");
     await assert.rejects(presence.linuxOpenFilePaths(9, procFs(["denied"], {})), "an unreadable fd folder is not an empty one");
     for (const [command, looked] of [
       ["/opt/Agent Tools/agy --conversation c1", true],
@@ -218,6 +224,12 @@ async function main() {
       assert.equal(verdict.reason, "conversation-unknown");
       assert.equal(verdict.detail, "no conversation id");
     }
+
+    // Wake: a conversation agy no longer lists is not free to reopen.
+    assert.equal(await presence.antigravityConversationHeld("conv-x", () => ({ known: false, busy: null })), "missing");
+    assert.equal(await presence.antigravityConversationHeld("conv-x", () => ({ known: true, busy: "subagent" })), true);
+    assert.equal(await presence.antigravityConversationHeld("conv-x", () => null), null);
+    assert.equal(await presence.antigravityConversationHeld("conv-x", () => undefined), null);
 
     // The pane's one agy, holding one conversation, names it; anything else is unknown.
     A.pids.set("p2", 200);
@@ -298,6 +310,19 @@ async function main() {
     writer.exec("UPDATE conversation_summaries SET not_fully_idle = 1 WHERE conversation_id = 'live'");
     assert.deepEqual(summaries.readAntigravityConversationActivity(liveDb, "live"), { known: true, busy: "conversation" }, "a flag still in the log read stale");
     writer.close();
+    // A write between the look at the files and the read: no answer.
+    const realStat = fs.statSync;
+    let stats = 0;
+    fs.statSync = (p, o) => {
+      const s = realStat(p, o);
+      if (s && String(p) === liveDb && ++stats > 1) s.mtimeNs += 1n;
+      return s;
+    };
+    try {
+      assert.throws(() => summaries.readAntigravityConversationActivity(liveDb, "live"), /wrote its conversation list/);
+    } finally {
+      fs.statSync = realStat;
+    }
     const oldDb = path.join(dir, "old.db");
     const odb = new DatabaseSync(oldDb);
     odb.exec("CREATE TABLE conversation_summaries (conversation_id text, parent_conversation_id text, nesting_depth integer)");

@@ -4,7 +4,7 @@
 // read: not raw_summary, not its full-text table, not the per-conversation
 // databases, and never its sign-in or settings. agy itself is never run.
 
-import { closeSync, existsSync, openSync, readSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -277,9 +277,29 @@ function busyFlag(value: unknown): boolean | null {
 export function readAntigravityConversationActivity(
   dbPath: string,
   conversationId: string,
-  openReadOnly: (path: string) => SummaryDatabase = openCurrentSummaryDatabase,
+  openReadOnly?: (path: string) => SummaryDatabase,
 ): AntigravityConversationActivity | null {
-  const db = openReadOnly(dbPath);
+  if (openReadOnly) return readActivity(openReadOnly(dbPath), conversationId);
+  // A writer may start, commit and even checkpoint between the opener's look
+  // at the files and the read: the files must be the same after the read,
+  // or the answer could be the old flag.
+  const before = summaryFilesState(dbPath);
+  const activity = readActivity(openCurrentSummaryDatabase(dbPath), conversationId);
+  if (summaryFilesState(dbPath) !== before) throw new Error("agy wrote its conversation list during the read");
+  return activity;
+}
+
+/** The database file and its log and index, as size, change time and inode. */
+function summaryFilesState(dbPath: string): string {
+  return [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]
+    .map((path) => {
+      const stat = statSync(path, { throwIfNoEntry: false, bigint: true });
+      return stat ? `${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}` : "-";
+    })
+    .join("|");
+}
+
+function readActivity(db: SummaryDatabase, conversationId: string): AntigravityConversationActivity | null {
   try {
     const present = new Set(db.prepare("PRAGMA table_info(conversation_summaries)").all().map((row) => row.name));
     if (!["conversation_id", "parent_conversation_id", "nesting_depth", "not_fully_idle"].every((column) => present.has(column))) {

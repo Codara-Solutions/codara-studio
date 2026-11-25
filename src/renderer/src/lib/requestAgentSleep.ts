@@ -25,9 +25,9 @@ export async function requestAgentSleep(input: {
   // Checked between the slow steps: false drops the request (the timer's
   // pane got the keyboard meanwhile).
   stillWanted?: () => boolean;
-  // Antigravity: the leaf takes the conversation its agy holds open before
-  // main is asked, so a Resume pressed the moment the pane falls asleep, or
-  // a restart, reopens that conversation and never agy's latest.
+  // Antigravity: once main accepts the sleep, the leaf takes the
+  // conversation its agy held open, so a restart reopens that conversation
+  // and never agy's latest. Required whenever the pointer would change.
   adoptSession?: (session: TerminalAgentSession) => void;
 }): Promise<AgentSleepOutcome | null> {
   const api = window.spark.agentHibernation;
@@ -66,9 +66,9 @@ export async function requestAgentSleep(input: {
     return { ok: false, reason: "cannot-resume", skip: `resume plan ${plan}`, runtime: session.runtime };
   }
   if (input.stillWanted && !input.stillWanted()) return null;
-  if (session.runtime === "antigravity" && session.sessionId !== input.session.sessionId) {
-    if (!input.adoptSession) return { ok: false, reason: "conversation-unknown", skip: "pointer cannot be kept", runtime: session.runtime };
-    input.adoptSession(session);
+  const adopt = session.runtime === "antigravity" && session.sessionId !== input.session.sessionId;
+  if (adopt && !input.adoptSession) {
+    return { ok: false, reason: "conversation-unknown", skip: "pointer cannot be kept", runtime: session.runtime };
   }
   const result = await api
     .hibernate({
@@ -83,6 +83,10 @@ export async function requestAgentSleep(input: {
     .catch(() => null);
   if (!result) return { ok: false, reason: "stop-failed", runtime: session.runtime };
   if (!result.ok) return { ok: false, reason: result.reason, runtime: session.runtime };
+  // Only a sleep main accepted changes the pane's pointer: a refused one
+  // leaves the live pane's restore pointer as it was. A Resume pressed
+  // before this lands wakes from the id main kept with the sleep.
+  if (adopt) input.adoptSession?.(session);
   return {
     ok: true,
     hibernation: {

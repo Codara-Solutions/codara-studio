@@ -164,13 +164,16 @@ export function antigravitySleepPointer(
 export function antigravityWakeRefusal(
   sessionId: string | null | undefined,
   namedElsewhere: readonly string[],
-  held: boolean | null,
+  held: boolean | "missing" | null,
 ): string | null {
   if (!sessionId || !isSafeSessionId(sessionId) || sessionId === ANTIGRAVITY_CONTINUE_SESSION_ID) {
     return "Codara does not know which Antigravity conversation this tab had. Close the tab and reopen the conversation from + > Antigravity worker.";
   }
   if (namedElsewhere.includes(sessionId)) return "Another tab has this Antigravity conversation. Close that tab, then try again.";
   if (held === true) return "Antigravity has this conversation open in another terminal. Close it there, then try again.";
+  if (held === "missing") {
+    return "Antigravity no longer lists this conversation, so Codara cannot reopen it. Close the tab and start a new one.";
+  }
   if (held === null) return "Codara could not check whether Antigravity has this conversation open elsewhere. Try again.";
   return null;
 }

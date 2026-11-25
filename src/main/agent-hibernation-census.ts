@@ -16,7 +16,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { runtimeFromProcessCommand } from "@shared/agent-patterns";
-import type { AgentHibernationRuntime } from "@shared/agent-hibernation";
+import { MAYBE_AGY_RE, type AgentHibernationRuntime } from "@shared/agent-hibernation";
 import { commandRunsCodaraMcpServer } from "@shared/codara-mcp-server";
 import { commandRunsNativeCli } from "./orchestration/native-cli-process-shutdown";
 import { listProcessesWithCommands, processStartMs, readProcFile } from "./owned-process-tree";
@@ -169,6 +169,11 @@ export function classifyPaneProcessTree(
   if (!byPid.has(rootPid)) {
     return { ok: false, reason: "process-list-unavailable", detail: "pane shell not listed" };
   }
+  // An agy that replaced the pane's shell (`exec agy`) is not the one the
+  // proof would read: the search below starts under the root.
+  if (runtime === "antigravity" && commandRunsAgent(byPid.get(rootPid)!.command, runtime)) {
+    return { ok: false, reason: "other-processes", detail: "agy is the pane's own process" };
+  }
 
   // Breadth-first so the shallowest agent process wins: an agent's own MCP
   // servers can carry agent-looking names, the agent itself never sits below
@@ -222,7 +227,8 @@ export function classifyPaneProcessTree(
     if (entry.pid === agent.pid || chain.has(entry.pid)) continue;
     // Antigravity's proof (antigravity-presence.ts) is read off one agy
     // process: a second one would be stopped unchecked, whenever it started.
-    if (runtime === "antigravity" && commandRunsAgent(entry.command, runtime)) {
+    // MAYBE_AGY_RE: unquoted spaces in its path too; a false match only keeps a pane awake.
+    if (runtime === "antigravity" && MAYBE_AGY_RE.test(entry.command)) {
       return { ok: false, reason: "other-processes", detail: `second agy ${describeProcess(entry, agentStart)}` };
     }
     if (underAgent.has(entry.pid)) {

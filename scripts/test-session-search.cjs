@@ -1081,6 +1081,7 @@ async function antigravityTests(m, work) {
     assert.match(m.antigravityWakeRefusal("conv-9", ["conv-9"], false), /Another tab has this Antigravity conversation/);
     assert.match(m.antigravityWakeRefusal("conv-9", [], true), /open in another terminal/, "an agy outside Codara holds it");
     assert.match(m.antigravityWakeRefusal("conv-9", [], null), /could not check/, "unknown is not free");
+    assert.match(m.antigravityWakeRefusal("conv-9", [], "missing"), /no longer lists this conversation/, "a deleted conversation is not free");
   });
 
   await check("Antigravity: a missing database or a table of another shape lists nothing and fails nothing", async () => {

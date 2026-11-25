@@ -14,7 +14,7 @@ import { readdir, readlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import type { AgentHibernationRefusal } from "../shared/agent-hibernation";
+import { MAYBE_AGY_RE, type AgentHibernationRefusal } from "../shared/agent-hibernation";
 import { isSafeSessionId } from "../shared/session-search";
 import { listProcessesWithCommands } from "./owned-process-tree";
 import {
@@ -70,19 +70,24 @@ export async function linuxOpenFilePaths(pid: number, fs: ProcFs = { readdir, re
   const fds = await fs.readdir(dir).catch((error) => (gone(error) ? null : Promise.reject(error)));
   if (fds === null) return [];
   if (fds.length > MAX_FDS) return null;
-  const paths: string[] = [];
-  for (const fd of fds) {
-    const path = await fs.readlink(`${dir}/${fd}`).catch(() => null);
-    if (path === null) {
-      // The process may have exited mid-read; anything else is unknown.
-      const after = await fs.readdir(dir).catch((error) => (gone(error) ? null : undefined));
-      return after === null ? [] : null;
+  const readAll = async (): Promise<string[] | null> => {
+    const out: string[] = [];
+    for (const fd of fds) {
+      const path = await fs.readlink(`${dir}/${fd}`).catch(() => null);
+      if (path === null) return null;
+      out.push(path);
     }
-    paths.push(path);
-  }
+    return out;
+  };
+  const paths = await readAll();
+  // Read twice, numbers and targets: a descriptor closed and its number
+  // reused for another file meanwhile shows as a changed target.
   const again = await fs.readdir(dir).catch((error) => (gone(error) ? null : undefined));
+  // The process may have exited mid-read: it holds nothing.
   if (again === null) return [];
-  if (again === undefined || again.length !== fds.length || fds.some((fd) => !again.includes(fd))) return null;
+  if (paths === null || again === undefined || again.length !== fds.length || fds.some((fd) => !again.includes(fd))) return null;
+  const second = await readAll();
+  if (second === null || second.some((path, i) => path !== paths[i])) return null;
   return paths;
 }
 
@@ -184,22 +189,26 @@ export async function antigravitySleepVerdict(
   return judgeAntigravitySleep(conversationId, open, isAntigravityConversationId(conversationId) ? read.activity(conversationId) : undefined);
 }
 
-// The listing joins argv with spaces, so `/opt/Agent Tools/agy` has no
-// first token named agy. Any command with an agy path segment is looked at:
-// reading a process that is not agy finds no lock, and missing one would let
-// two agy processes write one conversation.
-export const MAYBE_AGY_RE = /(?:^|[\s/\\])agy(?:\.exe)?(?=\s|$)/i;
+// The listing joins argv with spaces: any command with an agy path segment
+// is looked at. Reading a process that is not agy finds no lock; missing one
+// would let two agy processes write one conversation.
+export { MAYBE_AGY_RE };
 
 /**
  * Before a sleeping pane runs `agy --conversation <id>`: true when some agy
  * on this machine has that conversation open or agy marks it working, so a
- * second agy must not open it. Null when that cannot be read.
+ * second agy must not open it. "missing" when agy no longer lists it as a
+ * top-level conversation (nothing to reopen); null when that cannot be read.
  */
-export async function antigravityConversationHeld(conversationId: string): Promise<boolean | null> {
+export async function antigravityConversationHeld(
+  conversationId: string,
+  activityOf: (id: string) => AntigravityConversationActivity | null | undefined = currentConversationActivity,
+): Promise<boolean | "missing" | null> {
   if (!isAntigravityConversationId(conversationId)) return null;
-  const activity = currentConversationActivity(conversationId);
+  const activity = activityOf(conversationId);
   if (activity === undefined || activity === null) return null;
   if (activity.busy) return true;
+  if (!activity.known) return "missing";
   const processes = await listProcessesWithCommands(0).catch(() => null);
   if (!processes) return null;
   for (const proc of processes) {

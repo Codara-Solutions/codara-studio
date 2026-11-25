@@ -218,6 +218,14 @@ async function main() {
     !verdict.ok && verdict.reason === "other-processes" && /second agy/.test(verdict.detail ?? ""),
     verdict,
   );
+  verdict = classifyPaneProcessTree([agyShell, agy, agyMcp, proc(706, 701, 500, "/opt/Agent Tools/agy --continue")], 700, "antigravity");
+  check("a second agy under a path with spaces keeps the pane awake", !verdict.ok && verdict.reason === "other-processes", verdict);
+  verdict = classifyPaneProcessTree(
+    [proc(700, 1, -2_000, "/home/u/.local/bin/agy"), proc(707, 700, 0, "/home/u/.local/bin/agy -r other")],
+    700,
+    "antigravity",
+  );
+  check("an agy that replaced the pane's shell keeps the pane awake", !verdict.ok && verdict.reason === "other-processes", verdict);
   verdict = classifyPaneProcessTree([agyShell, proc(704, 700, 0, "node /home/u/tools/agy.js")], 700, "antigravity");
   check("a pane running only something named like agy has no agent", !verdict.ok && verdict.reason === "no-agent-process", verdict);
 
