@@ -26,6 +26,8 @@ export interface SetupManifestCopy {
 export interface SetupManifestLink {
   path: string;
   target: string;
+  /** A link the user made, put back exactly as it read (its text), even when what it names is gone. */
+  exact?: string;
 }
 
 export interface SetupManifest {
@@ -174,7 +176,7 @@ export async function releaseWorktreeLinks(worktreePath: string, dependencyLinks
     const pointsAt = await linkTarget(absolute);
     if (pointsAt === null) continue;
     const target = resolve(dirname(absolute), withoutLongPathPrefix(pointsAt));
-    if (await removeLinkEntry(absolute)) released.push({ path, target });
+    if (await removeLinkEntry(absolute)) released.push({ path, target, exact: pointsAt });
   }
   if (!manifest) return released;
   for (const link of manifest.links) {
@@ -210,12 +212,14 @@ export async function prepareWorktreeRemoval(worktreePath: string, dependencyLin
   }
   const released = await releaseWorktreeLinks(worktreePath, dependencyLinks);
   const manifest = await readSetupManifest(worktreePath).catch(() => null);
-  for (const link of manifest?.links ?? []) {
-    if (!safeRelative(link.path)) continue;
-    if ((await linkTarget(join(worktreePath, ...link.path.split("/")))) !== null) {
+  // Every link that was to go must be gone, the user's own included.
+  const paths = [...(manifest?.links ?? []).map((link) => link.path), ...dependencyLinks];
+  for (const path of paths) {
+    if (!safeRelative(path)) continue;
+    if ((await linkTarget(join(worktreePath, ...path.split("/")))) !== null) {
       await restoreWorktreeLinks(worktreePath, released);
       throw new Error(
-        `Could not take out the linked folder ${link.path} before removing the worktree. Close what uses it, then try again.`,
+        `Could not take out the linked folder ${path} before removing the worktree. Close what uses it, then try again.`,
       );
     }
   }
@@ -228,9 +232,14 @@ export async function restoreWorktreeLinks(worktreePath: string, links: readonly
     if (!safeRelative(link.path)) continue;
     const absolute = join(worktreePath, ...link.path.split("/"));
     if (await fsp.lstat(absolute).catch(() => null)) continue;
-    const target = await fsp.stat(link.target).catch(() => null);
-    if (!target?.isDirectory()) continue;
     try {
+      if (link.exact !== undefined && process.platform !== "win32") {
+        // As it read, dangling or relative alike.
+        await fsp.symlink(link.exact, absolute);
+        continue;
+      }
+      const target = await fsp.stat(link.target).catch(() => null);
+      if (!target?.isDirectory()) continue;
       await fsp.symlink(link.target, absolute, process.platform === "win32" ? "junction" : "dir");
     } catch {
       // Best effort: the worktree still works, only without that folder.

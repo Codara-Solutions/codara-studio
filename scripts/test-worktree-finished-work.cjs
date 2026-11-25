@@ -60,13 +60,15 @@ async function check(name, fn) {
 }
 
 async function main() {
-  const [inspect, scanMod, removeMod, agent, reads, github] = await Promise.all([
+  const [inspect, scanMod, removeMod, agent, reads, github, gitWorktrees, links] = await Promise.all([
     bundle("src/main/worktree-cleanup/inspect.ts", "inspect"),
     bundle("src/main/worktree-cleanup/scan.ts", "scan"),
     bundle("src/main/worktree-cleanup/remove.ts", "remove"),
     bundle("src/main/agent-worktrees.ts", "agent"),
     bundle("src/main/worktree-cleanup/pull-request-reads.ts", "reads"),
     bundle("src/main/github-cli.ts", "github"),
+    bundle("src/main/git-worktrees.ts", "gitWorktrees"),
+    bundle("src/main/worktree-setup/links.ts", "links"),
   ]);
 
   const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "codara-finished-work-")));
@@ -166,6 +168,19 @@ async function main() {
       assert.equal((await inspect.mergeFacts(repoContext([pr21]), siteTip, "feat/site", onMain)).state, "merged");
     });
 
+    await check("staging: a worktree based on staging is judged by origin's staging now, and only its exact head", async () => {
+      const onStaging = { name: "origin/staging", commit: git(repo, ["rev-parse", "origin/staging"]) };
+      assert.equal((await inspect.mergeFacts(repoContext([pr21]), siteTip, "feat/site", onStaging)).state, "merged");
+      // A tip behind the merged head: in staging, but not what was merged.
+      const behind = await inspect.mergeFacts(repoContext([pr21]), siteFirst, "feat/site", onStaging);
+      assert.equal(behind.state, "merged", "an ancestor of staging as origin has it is merged");
+      // Rewound on GitHub, still in the stale tracking ref: proves nothing.
+      git(hub, ["push", "-q", "-f", "origin", "origin/main:refs/heads/staging"]);
+      assert.equal((await inspect.mergeFacts(repoContext([pr21]), siteTip, "feat/site", onStaging)).state, "unmerged");
+      assert.equal((await inspect.mergeFacts(repoContext([pr21]), siteFirst, "feat/site", onStaging)).state, "unmerged");
+      git(hub, ["push", "-q", "-f", "origin", "staging"]);
+    });
+
     // ── The cleanup harness ────────────────────────────────────────────────
     const infra = add("infra", "feat/infra");
     const linked = add("linked", "feat/linked");
@@ -224,7 +239,66 @@ async function main() {
       assert.deepEqual(codes(entry), [], JSON.stringify(entry.blockers));
       assert.equal(entry.localWork, null, JSON.stringify(entry.localWork));
       assert.equal(agent.isRegenerableIgnored("infra/.terraform/", [], agent.packageRootTester(infra)), true);
-      assert.equal(agent.isRegenerableIgnored(".terraform/", []), true, "at the root too");
+      const rooted = path.join(scratch, "rooted");
+      fs.mkdirSync(path.join(rooted, ".terraform", "providers"), { recursive: true });
+      fs.writeFileSync(path.join(rooted, ".terraform.lock.hcl"), "# lock\n");
+      assert.equal(agent.isRegenerableIgnored(".terraform/", [], agent.packageRootTester(rooted)), true, "at the root too");
+      assert.equal(agent.isRegenerableIgnored(".terraform/", []), false, "never without looking in it");
+    });
+
+    await check("terraform: a file init never writes in .terraform/ is asked about", async () => {
+      const note = path.join(infra, "infra", ".terraform", "notes.txt");
+      fs.writeFileSync(note, "mine\n");
+      const entry = await checkOf(infra);
+      assert.ok(entry.localWork?.ignored.includes("infra/.terraform/"), JSON.stringify(entry.localWork));
+      fs.rmSync(note);
+      assert.equal((await checkOf(infra)).localWork, null);
+    });
+
+    await check("terraform: a local tag, a hidden edit or a config of its own makes a module a checkout, and git never runs there", async () => {
+      // A commit only a local tag holds.
+      git(vpc, ["checkout", "-q", "--detach"]);
+      commitFile(vpc, "tagged.tf", "# mine\n", "tagged locally");
+      git(vpc, ["tag", "mine"]);
+      git(vpc, ["checkout", "-q", "v1.0.0"]);
+      assert.ok(codes(await checkOf(infra)).includes("NESTED_CHECKOUT"), "a local tag proves nothing");
+      git(vpc, ["tag", "-d", "mine"]);
+      git(vpc, ["reflog", "expire", "--expire=now", "--all"]);
+      assert.deepEqual(codes(await checkOf(infra)), []);
+      // An edit git status is told not to look at.
+      git(vpc, ["update-index", "--assume-unchanged", "main.tf"]);
+      fs.writeFileSync(path.join(vpc, "main.tf"), "hidden edit\n");
+      assert.ok(codes(await checkOf(infra)).includes("NESTED_CHECKOUT"), "assume-unchanged");
+      git(vpc, ["update-index", "--no-assume-unchanged", "main.tf"]);
+      git(vpc, ["checkout", "-q", "--", "main.tf"]);
+      assert.deepEqual(codes(await checkOf(infra)), []);
+      // A filter in its own config: refused before any git command runs there.
+      const marker = path.join(scratch, "filter-ran");
+      const config = path.join(vpc, ".git", "config");
+      const plain = fs.readFileSync(config, "utf8");
+      fs.writeFileSync(config, `${plain}[filter "x"]\n\tclean = touch ${marker}\n`);
+      fs.mkdirSync(path.join(vpc, ".git", "info"), { recursive: true });
+      fs.writeFileSync(path.join(vpc, ".git", "info", "attributes"), "* filter=x\n");
+      assert.ok(codes(await checkOf(infra)).includes("NESTED_CHECKOUT"), "a config of its own");
+      assert.equal(fs.existsSync(marker), false, "its filter never ran");
+      fs.writeFileSync(config, plain);
+      fs.rmSync(path.join(vpc, ".git", "info", "attributes"));
+      assert.deepEqual(codes(await checkOf(infra)), []);
+    });
+
+    await check("terraform: an edit to a module after the check changes the removal's last fingerprint", async () => {
+      const regenerable = agent.fingerprintRegenerable(infra, []);
+      const before = await gitWorktrees.worktreeFingerprint(infra, undefined, regenerable);
+      assert.equal(await gitWorktrees.worktreeFingerprint(infra, undefined, regenerable), before, "stable when nothing changes");
+      fs.writeFileSync(path.join(vpc, "main.tf"), "edited during removal\n");
+      assert.notEqual(await gitWorktrees.worktreeFingerprint(infra, undefined, regenerable), before, "a module file");
+      git(vpc, ["checkout", "-q", "--", "main.tf"]);
+      const restored = await gitWorktrees.worktreeFingerprint(infra, undefined, regenerable);
+      commitFile(vpc, "late.tf", "# late\n", "late commit");
+      assert.notEqual(await gitWorktrees.worktreeFingerprint(infra, undefined, regenerable), restored, "a commit in it");
+      git(vpc, ["checkout", "-q", "v1.0.0"]);
+      git(vpc, ["reflog", "expire", "--expire=now", "--all"]);
+      assert.deepEqual(codes(await checkOf(infra)), []);
     });
 
     await check("terraform: a module with an edit, an untracked file or a commit of its own is a checkout", async () => {
@@ -321,6 +395,43 @@ async function main() {
       assert.equal(result.outcomes[0].status, "removed", JSON.stringify(result.outcomes[0]));
       assert.equal(fs.existsSync(linked), false);
       assert.equal(fs.readFileSync(path.join(packages, "left-pad", "index.js"), "utf8"), "module.exports = 1;\n");
+    });
+
+    await check("link: a link alone in a folder of its own is taken out by the removal too", async () => {
+      const nested = add("nested-link", "feat/nested-link");
+      fs.mkdirSync(path.join(nested, "pkg"));
+      fs.symlinkSync(packages, path.join(nested, "pkg", "node_modules"), "dir");
+      const entry = await checkOf(nested);
+      assert.deepEqual(codes(entry), [], JSON.stringify(entry.blockers));
+      const result = await removeMod.removeCleanupWorktrees(deps, {
+        items: [{ repoRoot: repo, path: nested, fingerprint: entry.fingerprint, confirmDirty: false, confirmUnmerged: false }],
+        deleteMergedBranches: true,
+      });
+      assert.equal(result.outcomes[0].status, "removed", JSON.stringify(result.outcomes[0]));
+      assert.equal(fs.readFileSync(path.join(packages, "left-pad", "index.js"), "utf8"), "module.exports = 1;\n");
+    });
+
+    await check("link: a link a failed removal took out comes back exactly, dangling or relative", async () => {
+      const dir = path.join(scratch, "links");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.symlinkSync("../gone/node_modules", path.join(dir, "node_modules"));
+      const released = await links.prepareWorktreeRemoval(dir, ["node_modules"]);
+      assert.equal(fs.existsSync(path.join(dir, "node_modules")) || !!fs.lstatSync(path.join(dir, "node_modules"), { throwIfNoEntry: false }), false);
+      await links.restoreWorktreeLinks(dir, released);
+      assert.equal(fs.readlinkSync(path.join(dir, "node_modules")), "../gone/node_modules");
+    });
+
+    await check("link: a link that cannot be taken out stops the removal", async () => {
+      const dir = path.join(scratch, "stuck");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.symlinkSync(packages, path.join(dir, "node_modules"), "dir");
+      fs.chmodSync(dir, 0o555);
+      try {
+        await assert.rejects(links.prepareWorktreeRemoval(dir, ["node_modules"]), /node_modules/);
+        assert.equal(fs.readlinkSync(path.join(dir, "node_modules")), packages);
+      } finally {
+        fs.chmodSync(dir, 0o755);
+      }
     });
 
     // ── Every open pull request ────────────────────────────────────────────

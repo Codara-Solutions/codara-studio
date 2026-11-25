@@ -718,11 +718,27 @@ export async function mergeFacts(
   if (branch && (branch === shortBranch(target.name) || branch === target.name)) return { state: "base", ...base };
   const { ahead, behind } = await aheadBehind(repo.root, target.commit, head);
   const facts = { ...base, ahead, behind };
-  if (ahead === 0 && (await isAncestor(repo.root, head, target.commit))) return { state: "merged", proof: "ancestor", ...facts };
+  const fallback = repo.base;
+  const defaultShort = fallback ? shortBranch(fallback.name) : null;
+  // Only as origin has it now: a stale tracking ref may still hold a merge
+  // the branch lost (deleted unmerged, force-pushed). Its commit must be
+  // here too, or the merge cannot be found in it.
+  const liveCommit = async (name: string): Promise<string | null> => {
+    const now = await remoteHead(repo, name);
+    return now && (await revParse(repo.root, `${now}^{commit}`)) ? now : null;
+  };
+  // A long-lived branch other than the default (staging, release), which
+  // some repositories reset: judged only as origin has it now.
+  const targetShort = target.name.startsWith("origin/") ? target.name.slice("origin/".length) : target.name;
+  const longLivedTarget = PROTECTED_BRANCHES.has(targetShort) && targetShort !== defaultShort;
+  // What the target holds for the proofs below that read its content.
+  const judged = longLivedTarget ? await liveCommit(targetShort) : target.commit;
+  if (judged && (longLivedTarget || ahead === 0) && (await isAncestor(repo.root, head, judged))) {
+    return { state: "merged", proof: "ancestor", ...facts };
+  }
   // A base that is not the default branch (a stacked pull request's branch,
   // often deleted once merged) can lag behind where the work went. The
   // default branch, as the remote has it, counts as well.
-  const fallback = repo.base;
   const onDefault = Boolean(fallback && branch && (branch === shortBranch(fallback.name) || branch === fallback.name));
   if (fallback && !onDefault && fallback.commit !== target.commit && (await isAncestor(repo.root, head, fallback.commit))) {
     const counts = await aheadBehind(repo.root, fallback.commit, head);
@@ -745,19 +761,12 @@ export async function mergeFacts(
     // their merges. A base on another remote (upstream/feat/x, a fork) gives
     // no such proof: its feat/x is not the branch the pull request merged into.
     const ownBase = !targetIsRemote ? target.name : target.name.startsWith("origin/") ? target.name.slice("origin/".length) : null;
-    // Only as origin has it now: a stale tracking ref may still hold a merge
-    // the branch lost (deleted unmerged, force-pushed). Its commit must be
-    // here too, or the merge cannot be found in it.
-    const liveCommit = async (base: string): Promise<string | null> => {
-      const now = await remoteHead(repo, base);
-      return now && (await revParse(repo.root, `${now}^{commit}`)) ? now : null;
-    };
     // A long-lived branch other than the default (staging, release) is where
     // some repositories merge first. Its copy on origin now counts as well,
-    // but only for a pull request whose head is exactly this tip: a folder
-    // with commits past what was merged stays unmerged.
-    const defaultShort = fallback ? shortBranch(fallback.name) : null;
-    const longLived = new Set([...PROTECTED_BRANCHES].filter((name) => name !== ownBase && name !== defaultShort));
+    // the worktree's own base included, but only for a pull request whose
+    // head is exactly this tip: a folder with commits past what was merged,
+    // or one behind it, stays unmerged.
+    const longLived = new Set([...PROTECTED_BRANCHES].filter((name) => name !== defaultShort));
     for (const name of branches) {
       const stacked = await proveByMergedPullRequestStack({
         repo: repo.root,
@@ -790,7 +799,7 @@ export async function mergeFacts(
       };
     }
   }
-  if ((await contentInTarget(repo.root, head, target.commit)) === true) {
+  if (judged && (await contentInTarget(repo.root, head, judged)) === true) {
     return { state: "merged", proof: "content-in-target", ...facts };
   }
   return { state: "unmerged", ...facts };

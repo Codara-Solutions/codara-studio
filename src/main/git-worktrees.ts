@@ -701,7 +701,22 @@ export async function worktreeFingerprint(
     const absolute = join(worktreePath, relative);
     const names = (await fingerprintFs.readdir(absolute)).sort();
     const infos = await Promise.all(names.map((name) => statOf(join(absolute, name))));
-    for (const [index, name] of names.entries()) await walk(code, join(relative, name), infos[index], regenerated);
+    // A checkout inside a regenerable folder (a module terraform cloned,
+    // judged untouched): its own files, refs and index count, so an edit or
+    // a commit made in it after the check shows.
+    const checkout = regenerated && names.some((name) => name.toLowerCase() === ".git");
+    for (const [index, name] of names.entries()) {
+      if (checkout && name.toLowerCase() === ".git") await walkGitState(code, join(relative, name), infos[index]);
+      else await walk(code, join(relative, name), infos[index], regenerated && !checkout);
+    }
+  };
+  // What of a nested checkout's .git can hold work: HEAD, the index, its
+  // refs; not its objects, which only grow.
+  const walkGitState = async (code: string, relative: string, info: Awaited<ReturnType<typeof statOf>>): Promise<void> => {
+    if (!info?.isDirectory()) return walk(code, relative, info);
+    for (const name of ["HEAD", "index", "packed-refs", "config", "refs"]) {
+      await walk(code, join(relative, name), await statOf(join(worktreePath, relative, name)));
+    }
   };
   for (let index = 0; index < records.length; index += 1) {
     const record = records[index];
@@ -844,7 +859,8 @@ async function tryRemoveWorktreeOnce(
 // Untracked node_modules links (isDependencyLink): taken out with setup's
 // links, so a removal never reaches through one. None when git cannot say.
 async function untrackedDependencyLinks(worktreePath: string): Promise<string[]> {
-  const out = await runGit(worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=normal"]).then(
+  // Each file: a pkg/ holding only a link is listed as pkg/ otherwise.
+  const out = await runGit(worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]).then(
     (result) => result.stdout,
     () => "",
   );
