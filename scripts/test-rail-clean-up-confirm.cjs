@@ -3,8 +3,10 @@
 "use strict";
 
 // The merged fold's Clean up confirm (rail/WorkspaceChildren.tsx): it asks
-// only for more than one worktree, never comes back by itself after the
-// worktrees went elsewhere, starts on Cancel, and keeps Escape to itself.
+// only for more than one worktree, in one dialog that names what each would
+// stop or delete, never comes back by itself after the worktrees went
+// elsewhere, starts on Cancel, keeps Escape to itself, and shows its
+// progress before the first removal is done.
 //
 //   node scripts/test-rail-clean-up-confirm.cjs
 
@@ -61,14 +63,24 @@ async function main() {
                   cleanUps: names.map((name) => ({
                     id: name,
                     name,
-                    cleanUp: async (confirmIgnored) => {
-                      window.cleaned.push(name);
+                    cleanUp: async (answer = {}) => {
+                      window.answers = window.answers || [];
+                      window.answers.push([name, answer]);
                       // "held" stays with a reason; "secret" asks about its
-                      // .env until the question's fingerprint comes back.
+                      // .env and "server" about its leftover until the
+                      // question's fingerprint comes back.
                       if (name === "held") return { status: "refused", message: "Close the tab first.", branchDeleted: false };
-                      if (name === "secret" && confirmIgnored !== "fp-1") {
+                      if (name === "secret" && answer.confirmIgnored !== "fp-1") {
                         return { status: "confirm", holds: [".env"], fingerprint: "fp-1", branchDeleted: false };
                       }
+                      if (name === "server" && answer.confirmStop !== "sp-1") {
+                        const processes = [{ pid: 4242, program: "node server.js", runningMs: 3 * 3600000, startedBy: "started by an agent that is still open: the tab “dev”" }];
+                        return { status: "confirm", processes, stopFingerprint: "sp-1", branchDeleted: false };
+                      }
+                      if (answer.preview) return { status: "confirm", code: "READY", branchDeleted: false };
+                      window.cleaned.push(name);
+                      // A removal that waits for the test to let it finish.
+                      if (window.hold) await new Promise((done) => (window.release = done));
                       return { status: "removed", branchDeleted: true };
                     },
                   })),
@@ -216,7 +228,7 @@ async function main() {
     await page.evaluate(() => window.setMergedNames(["held", "secret"]));
     const notice = page.getByTestId("workspace-merged-notice");
     await cleanUp.click();
-    await confirm.getByRole("button", { name: "Clean up" }).click();
+    // One dialog: what was refused is a line by the button, not a question.
     await expect(confirm).toContainText("secret holds .env");
     await expect(notice).toContainText("held: Close the tab first.");
     await confirm.getByRole("button", { name: "Remove anyway" }).click();
@@ -225,6 +237,44 @@ async function main() {
     await expect(notice).toContainText("held: Close the tab first.");
     await notice.getByRole("button", { name: /^Dismiss/ }).click();
     await expect(notice).toHaveCount(0);
+
+    // A leftover program and an ignored file, asked about together, one
+    // line per worktree; the yes carries both fingerprints back.
+    await page.evaluate(() => window.setMergedNames(["server", "secret", "plain"]));
+    await cleanUp.click();
+    await expect(confirm).toContainText("Clean up 3 merged worktrees?");
+    await expect(confirm.locator("li")).toHaveText([
+      "server: stops node server.js (pid 4242), running 3 h, started by an agent that is still open: the tab “dev”",
+      "secret: deletes .env",
+      "plain",
+    ]);
+    await page.evaluate(() => (window.answers = []));
+    await confirm.getByRole("button", { name: "Stop and clean up" }).click();
+    await expect(confirm).toHaveCount(0);
+    await expect
+      .poll(() => page.evaluate(() => window.answers))
+      .toEqual([
+        ["server", { confirmStop: "sp-1" }],
+        ["secret", { confirmIgnored: "fp-1" }],
+        ["plain", {}],
+      ]);
+
+    // The button says so at once, before the first removal is done, and
+    // counts through them.
+    await page.evaluate(() => window.setMergedNames(["one", "two"]));
+    await page.evaluate(() => (window.hold = true));
+    await cleanUp.click();
+    await confirm.getByRole("button", { name: "Clean up" }).click();
+    await expect(cleanUp).toHaveText("Cleaning 1 of 2…");
+    await expect(cleanUp).toBeDisabled();
+    assert.deepEqual(await page.evaluate(() => window.cleaned.slice(-1)), ["one"], "the first removal is still running");
+    await page.evaluate(() => window.release());
+    await expect(cleanUp).toHaveText("Cleaning 2 of 2…");
+    await page.evaluate(() => {
+      window.hold = false;
+      window.release();
+    });
+    await expect(cleanUp).toHaveText("Clean up");
     assert.deepEqual(errors, []);
     console.log("PASS the merged fold's Clean up confirm");
   } finally {

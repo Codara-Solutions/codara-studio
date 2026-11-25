@@ -61,6 +61,18 @@ export interface WorktreeInUse {
   idle?: true;
   /** With "agent": the pane of its tab, so the agent asking can tell its own tab apart. */
   paneId?: string;
+  /** With "process": the processes, so the rail's Clean up can name and stop them. */
+  pids?: number[];
+}
+
+/** A program left running in a merged worktree, as the rail's Clean up names it before stopping it. */
+export interface WorktreeLeftoverProcess {
+  pid: number;
+  /** The program and its script only, such as "node server.js": other arguments can hold a token. */
+  program: string;
+  runningMs?: number;
+  /** "started by an agent that is still open: the tab “X”", when that is so. */
+  startedBy?: string;
 }
 
 /** Ignored files copied out of a worktree before it was removed, kept for 30 days. */
@@ -332,6 +344,12 @@ export interface WorktreeRemovalCheck extends WorktreeCleanupTarget {
   blockers: Array<{ code: WorktreeCleanupCode; message: string }>;
   /** What the IN_USE blocker is about. */
   inUse?: WorktreeInUse[];
+  /**
+   * Processes inside it the caller accepted (allowInUse has "process"), so
+   * they block nothing here: the rail stops them first, then checks again.
+   * Not part of the fingerprint.
+   */
+  leftoverPids?: number[];
   localWork: WorktreeLocalWork | null;
   unmerged: WorktreeUnmergedWork | null;
   merge: WorktreeMergeFacts;
@@ -474,10 +492,23 @@ export interface WorktreeRailCleanupRequest {
    * files go with the folder. Anything changed since refuses again.
    */
   confirmIgnored?: string;
+  /**
+   * The `stopFingerprint` of a "confirm" answer the user accepted: exactly
+   * those processes are stopped first. Any other list asks again.
+   */
+  confirmStop?: string;
+  /**
+   * With "manual": check only and say what a Clean up would ask about, or
+   * code "READY" when nothing; nothing is stopped or removed.
+   */
+  preview?: boolean;
 }
 
 export interface WorktreeRailCleanupResult {
-  /** "confirm": only ignored files hold it back; ask, then send the fingerprint back. */
+  /**
+   * "confirm": only ignored files or processes left running hold it back
+   * (or, for a preview, nothing does); ask, then send the fingerprints back.
+   */
   status: "removed" | "refused" | "failed" | "confirm";
   /** What held it back, for the audit log: a check's blocker code, or the rail's own. */
   code?: string;
@@ -491,6 +522,10 @@ export interface WorktreeRailCleanupResult {
   holds?: string[];
   /** With "confirm": what the answer is tied to. */
   fingerprint?: string;
+  /** With "confirm": the programs left running in it, stopped first on a yes. */
+  processes?: WorktreeLeftoverProcess[];
+  /** With "confirm" and processes: what stopping them is tied to. */
+  stopFingerprint?: string;
   /** With "removed": the space it took, when it was measured. */
   reclaimedBytes?: number;
   /** With "removed": where its ignored files were kept. */
@@ -560,6 +595,20 @@ export function formatAge(at: number | null, now: number): string {
   const months = Math.floor(days / 30);
   if (months < 24) return `${months} months ago`;
   return `${Math.floor(days / 365)} years ago`;
+}
+
+/** "node server.js (pid 4242), running 3 h, started by an agent that is still open: the tab “X”". */
+export function leftoverText(entry: WorktreeLeftoverProcess): string {
+  const ms = entry.runningMs;
+  let running = "";
+  if (typeof ms === "number" && Number.isFinite(ms) && ms >= 0) {
+    const minutes = Math.floor(ms / 60_000);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+    running =
+      minutes < 1 ? "under a minute" : minutes < 60 ? `${minutes} min` : hours < 48 ? `${hours} h` : `${days} days`;
+  }
+  return [`${entry.program} (pid ${entry.pid})`, running ? `running ${running}` : "", entry.startedBy ?? ""].filter(Boolean).join(", ");
 }
 
 export function plural(count: number, one: string, many = `${one}s`): string {

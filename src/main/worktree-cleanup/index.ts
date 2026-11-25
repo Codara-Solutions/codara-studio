@@ -36,6 +36,7 @@ import { publishState } from "../workspace-state-publish";
 import type { AgentCleanupDeps, ApprovalAsker } from "./agent-tool";
 import { pruneWorktreeArchive, worktreeArchiveRoot } from "./archive";
 import type { RepoPullRequests, WorktreeCleanupDeps } from "./inspect";
+import { systemLeftovers } from "./leftovers";
 import type { AutoRemoveMergedOptions } from "./rail";
 import type { ScannedWorktree } from "./scan";
 import type { SizeMeasurer, SizeStore } from "./space";
@@ -148,6 +149,7 @@ function deps(invalidateGitCache: (cwd: string) => void): WorktreeCleanupDeps {
     agentSessionName,
     paneIdleMs: (paneId) => paneIdleMs(paneId),
     archiveRoot: () => worktreeArchiveRoot(codaraHome()),
+    leftovers: systemLeftovers({ appPid: process.pid, sessionPids: () => pty.sessionPids() }),
   };
 }
 

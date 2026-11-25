@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import {
   AGENT_LINE_STATE_LABELS,
   AGENT_LINE_STATE_TONES,
@@ -10,7 +10,7 @@ import { formatAgentSpan } from "@shared/agent-board";
 import type { WorktreeRailExternal } from "@shared/worktree-cleanup";
 import { useAgentNotes } from "../workspace-status/agentNotesStore";
 import { AgentLineItem, useMinuteClock } from "../workspace-status/WorkspaceAgentsLine";
-import { CleanUpHoldsConfirm, RailCleanUpNotices, RailConfirm, useRailCleanUp, type RailCleanUpEntry } from "./RailCleanUp";
+import { CleanUpConfirm, RailCleanUpNotices, useRailCleanUp, type RailCleanUpEntry } from "./RailCleanUp";
 import "./workspace-children.css";
 
 // What hangs under a project in the workspace rail (DESIGN.md, "Worktrees in
@@ -64,22 +64,16 @@ export interface MergedWorktrees {
   count: number;
   open: boolean;
   onToggle: () => void;
-  /** The worktrees Clean up removes; more than one asks first, and none hides it. */
+  /** The worktrees Clean up removes; more than one asks first, in one dialog, and none hides it. */
   cleanUps: readonly RailCleanUpEntry[];
   rows: ReactNode[];
 }
 
 /** The "N merged · Clean up" line and its rows, in the rail and in Source Control's lanes. */
 export function MergedFold({ merged }: { merged: MergedWorktrees }) {
-  const [confirming, setConfirming] = useState(false);
   const cleanUps = merged.cleanUps;
+  // Several are checked first and asked about in one dialog (useRailCleanUp).
   const cleanUp = useRailCleanUp(cleanUps.map((entry) => entry.id));
-  const asks = cleanUps.length > 1;
-  // Once there is nothing left to ask about, the question is over: a later
-  // merge must not bring it back by itself.
-  useEffect(() => {
-    if (!asks) setConfirming(false);
-  }, [asks]);
   return (
     <>
       {merged.count > 0 && (
@@ -102,9 +96,10 @@ export function MergedFold({ merged }: { merged: MergedWorktrees }) {
               data-testid="workspace-merged-clean-up"
               title="Remove the merged worktrees, their branches and their rows"
               disabled={cleanUp.cleaning}
-              onClick={() => (asks ? setConfirming(true) : cleanUp.start(cleanUps))}
+              aria-busy={cleanUp.cleaning}
+              onClick={() => cleanUp.start(cleanUps)}
             >
-              {cleanUp.cleaning ? "Cleaning…" : "Clean up"}
+              {cleanUp.label ?? "Clean up"}
             </button>
           )}
         </div>
@@ -117,22 +112,8 @@ export function MergedFold({ merged }: { merged: MergedWorktrees }) {
           onDismiss={cleanUp.dismiss}
         />
       )}
-      {confirming && asks && (
-        <RailConfirm
-          title={`Clean up ${cleanUps.length} merged worktrees?`}
-          text="Their folders, branches and rows are removed:"
-          items={cleanUps.map((entry) => entry.name)}
-          okLabel="Clean up"
-          testId="workspace-merged-clean-up-confirm"
-          onCancel={() => setConfirming(false)}
-          onConfirm={() => {
-            setConfirming(false);
-            cleanUp.start(cleanUps);
-          }}
-        />
-      )}
-      {!confirming && cleanUp.holding.length > 0 && (
-        <CleanUpHoldsConfirm
+      {cleanUp.holding.length > 0 && (
+        <CleanUpConfirm
           holding={cleanUp.holding}
           testId="workspace-merged-clean-up-confirm"
           onCancel={cleanUp.cancelHolding}

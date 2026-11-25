@@ -51,6 +51,7 @@ import {
   type RepoContext,
   type WorktreeCleanupDeps,
 } from "./inspect";
+import { describeLeftovers, leftoverFingerprint, shownLeftover, stopLeftovers, type Leftover } from "./leftovers";
 import {
   checkCleanupTargets,
   dateStamp,
@@ -581,6 +582,28 @@ function railRefusal(
   return null;
 }
 
+// The tab each terminal pane's shell belongs to, to name what a leftover
+// process runs under.
+async function paneTabs(deps: WorktreeCleanupDeps): Promise<Map<number, string>> {
+  const [terminals, state] = await Promise.all([
+    deps.listRendererTerminals().catch(() => null),
+    deps.loadState().catch(() => null),
+  ]);
+  const tabs = new Map<number, string>();
+  for (const terminal of terminals ?? []) {
+    const pid = deps.sessionPid?.(terminal.paneId) ?? null;
+    if (pid === null) continue;
+    const title = cleanText(terminal.title ?? "", 60);
+    const where = cleanText(state?.workspaces.find((entry) => entry.id === terminal.workspaceId)?.name ?? "", 60);
+    tabs.set(pid, `${title ? `the tab “${title}”` : "a terminal tab"}${where ? ` in ${where}` : ""}`);
+  }
+  return tabs;
+}
+
+function leftoversText(list: readonly Leftover[]): string {
+  return list.map((entry) => `${entry.program} (pid ${entry.pid})`).join(", ");
+}
+
 async function cleanUpRegistered(
   deps: WorktreeCleanupDeps,
   repo: RepoContext,
@@ -589,48 +612,119 @@ async function cleanUpRegistered(
   request: WorktreeRailCleanupRequest,
   options: RemoveOptions,
 ): Promise<WorktreeRailCleanupResult> {
-  const allowInUse = allowedUses(request.mode, await folderGone(path));
+  const missing = await folderGone(path);
+  const allowInUse = allowedUses(request.mode, missing);
   const requireKnownUsage = request.mode === "auto-merged";
   // A click takes only merged, committed work (railRefusal), so the maker's
   // tab in another folder (a coordinator open for days) does not hold it.
   // A worktree just made, with nothing committed yet, is where that agent
   // is about to start; the rail offers it only once it is stale.
   const makerElsewhereOk = request.mode === "manual" && !(await freshlyMade(deps, repo, workspace, path));
-  const [check] = await checkCleanupTargets(deps, [{ repoRoot: repo.root, path }], {
-    allowInUse,
-    requireKnownUsage,
-    makerElsewhereOk,
-  });
-  if (!check) return refused("The worktree could not be checked.", workspace.name, "CHECK_FAILED");
-  // Neither automatic mode goes ahead on a branch git could not read: the
-  // one the check judged (the worktree may have switched) and the row's.
-  if (request.mode !== "manual") {
-    for (const branch of new Set([check.branch, workspace.copyBranch?.branch].filter((name): name is string => Boolean(name)))) {
-      const unread = await branchTip(repo.root, branch).then(
-        () => null,
-        (err: unknown) => errorText(err),
-      );
-      if (unread) return refused(`${unread} Nothing was removed.`, workspace.name);
+  // Processes left running inside are judged apart (leftovers.ts) when they
+  // can be stopped; the removal itself never accepts one.
+  const stopper = !missing && request.mode !== "auto" ? deps.leftovers : undefined;
+  const judge = async (allow: ReadonlySet<WorktreeInUseKind> | undefined) => {
+    const [check] = await checkCleanupTargets(deps, [{ repoRoot: repo.root, path }], {
+      allowInUse: allow,
+      requireKnownUsage,
+      makerElsewhereOk,
+    });
+    if (!check) return refused("The worktree could not be checked.", workspace.name, "CHECK_FAILED");
+    // Neither automatic mode goes ahead on a branch git could not read: the
+    // one the check judged (the worktree may have switched) and the row's.
+    if (request.mode !== "manual") {
+      for (const branch of new Set([check.branch, workspace.copyBranch?.branch].filter((name): name is string => Boolean(name)))) {
+        const unread = await branchTip(repo.root, branch).then(
+          () => null,
+          (err: unknown) => errorText(err),
+        );
+        if (unread) return refused(`${unread} Nothing was removed.`, workspace.name);
+      }
+    }
+    const parentPresent = await parentHoldsFolders(path);
+    const why =
+      railRefusal(check, request, repo, parentPresent, Boolean(deps.archiveRoot)) ??
+      (request.mode === "auto-merged" ? await autoMergedRefusal(repo, workspace, check.merge, check.branch, check.head) : null);
+    return why ? refused(why, workspace.name, refusalCode(check)) : check;
+  };
+  let judged = await judge(stopper ? new Set<WorktreeInUseKind>([...(allowInUse ?? []), "process"]) : allowInUse);
+  if ("status" in judged) return judged;
+  let check: WorktreeRemovalCheck = judged;
+  const real = await canonicalPath(path);
+  let leftovers: Leftover[] = [];
+  if (stopper && check.leftoverPids?.length) {
+    const described = await describeLeftovers(stopper, real, check.leftoverPids, await paneTabs(deps));
+    if (!described) return refused("What runs in it could not be read, so nothing was stopped or removed.", workspace.name, "IN_USE");
+    const blocked = described.filter((entry) => entry.blocked);
+    if (blocked.length) {
+      const why = blocked.map((entry) => `${entry.program} (pid ${entry.pid}) runs in it, and ${entry.blocked}.`).join(" ");
+      return refused(why, workspace.name, "IN_USE");
+    }
+    // Nobody is asked in the unattended mode: it stops only what nothing
+    // leads to any more, and everything else waits for a click.
+    if (request.mode === "auto-merged" && described.some((entry) => !entry.orphan)) {
+      return refused(`Stop ${leftoversText(described.filter((entry) => !entry.orphan))} in it first.`, workspace.name, "IN_USE");
+    }
+    leftovers = described;
+  }
+  const holdsIgnored = !check.alreadyRemoved && check.localWork !== null;
+  if (request.mode === "manual") {
+    const stopFingerprint = leftovers.length ? leftoverFingerprint(real, leftovers) : undefined;
+    const askIgnored = holdsIgnored && request.confirmIgnored !== check.fingerprint;
+    const askStop = stopFingerprint !== undefined && request.confirmStop !== stopFingerprint;
+    if (request.preview || askIgnored || askStop) {
+      const asked = Boolean(request.confirmIgnored || request.confirmStop) && (askIgnored || askStop);
+      return {
+        status: "confirm",
+        code: askStop ? "CONFIRM_STOP" : askIgnored ? "CONFIRM_IGNORED" : "READY",
+        workspaceName: workspace.name,
+        branchDeleted: false,
+        ...(holdsIgnored ? { holds: check.localWork!.ignored, fingerprint: check.fingerprint } : {}),
+        ...(stopFingerprint ? { processes: leftovers.map(shownLeftover), stopFingerprint } : {}),
+        ...(asked ? { message: "It changed since you were asked." } : {}),
+      };
     }
   }
-  const parentPresent = await parentHoldsFolders(path);
-  const canArchive = Boolean(deps.archiveRoot);
-  const why =
-    railRefusal(check, request, repo, parentPresent, canArchive) ??
-    (request.mode === "auto-merged" ? await autoMergedRefusal(repo, workspace, check.merge, check.branch, check.head) : null);
-  if (why) return refused(why, workspace.name, refusalCode(check));
-  const holdsIgnored = !check.alreadyRemoved && check.localWork !== null;
-  if (holdsIgnored && request.mode === "manual" && request.confirmIgnored !== check.fingerprint) {
-    return {
-      status: "confirm",
-      code: "CONFIRM_IGNORED",
-      workspaceName: workspace.name,
-      branchDeleted: false,
-      holds: check.localWork!.ignored,
-      fingerprint: check.fingerprint,
-      ...(request.confirmIgnored ? { message: "It changed since you were asked." } : {}),
-    };
+  if (check.leftoverPids?.length) {
+    const failed = leftovers.length ? await stopLeftovers(stopper!, real, leftovers) : [];
+    if (failed.length) {
+      const why = failed.map(({ entry, why: reason }) => `${entry.program} (pid ${entry.pid}): ${reason}.`).join(" ");
+      return refused(`${why} The worktree was kept.`, workspace.name, "STOP_FAILED");
+    }
+    // Checked again as the removal will check it: anything still inside,
+    // or started since, holds it as before.
+    judged = await judge(allowInUse);
+    if ("status" in judged) return judged;
+    check = judged;
+    const stillIgnored = !check.alreadyRemoved && check.localWork !== null;
+    if (request.mode === "manual" && stillIgnored && request.confirmIgnored !== check.fingerprint) {
+      return {
+        status: "confirm",
+        code: "CONFIRM_IGNORED",
+        workspaceName: workspace.name,
+        branchDeleted: false,
+        holds: check.localWork!.ignored,
+        fingerprint: check.fingerprint,
+        ...(request.confirmIgnored ? { message: "It changed since you were asked." } : {}),
+      };
+    }
   }
+  return removeChecked(deps, repo, workspace, path, request, options, check, { allowInUse, requireKnownUsage, makerElsewhereOk });
+}
+
+async function removeChecked(
+  deps: WorktreeCleanupDeps,
+  repo: RepoContext,
+  workspace: Workspace,
+  path: string,
+  request: WorktreeRailCleanupRequest,
+  options: RemoveOptions,
+  check: WorktreeRemovalCheck,
+  uses: { allowInUse?: ReadonlySet<WorktreeInUseKind>; requireKnownUsage: boolean; makerElsewhereOk: boolean },
+): Promise<WorktreeRailCleanupResult> {
+  const { allowInUse, requireKnownUsage, makerElsewhereOk } = uses;
+  const canArchive = Boolean(deps.archiveRoot);
+  const holdsIgnored = !check.alreadyRemoved && check.localWork !== null;
   // The removal checks again under the repository lock and refuses unless the
   // fingerprint of what was just judged, and confirmed, still matches.
   const { outcomes } = await removeCleanupWorktrees(
@@ -807,7 +901,8 @@ export async function cleanUpRailWorkspace(
       ...(row ? { workspaceName: row.name } : {}),
     }),
   );
-  if (!audited) {
+  // A preview that only says what it would ask leaves nothing to log.
+  if (!audited && !(request?.preview && result.status === "confirm" && result.code === "READY")) {
     await deps
       .audit({
         action: "remove",
@@ -840,6 +935,10 @@ async function cleanUpRailWorkspaceOnce(
     ...(mode === "manual" && typeof request?.confirmIgnored === "string" && request.confirmIgnored
       ? { confirmIgnored: request.confirmIgnored }
       : {}),
+    ...(mode === "manual" && typeof request?.confirmStop === "string" && request.confirmStop
+      ? { confirmStop: request.confirmStop }
+      : {}),
+    ...(mode === "manual" && request?.preview === true ? { preview: true } : {}),
   };
   const state = await deps.loadState();
   const workspace = state.workspaces.find((candidate) => candidate.id === normalized.workspaceId);
@@ -849,6 +948,8 @@ async function cleanUpRailWorkspaceOnce(
     withPullRequests: (root) => deps.pullRequests(root).catch(() => null),
   });
   const repo = repos.find((candidate) => candidate.workspaces.some((entry) => entry.id === workspace.id)) ?? null;
+  // A preview reads only: a row with no folder left has nothing to ask about.
+  if (normalized.preview && missing) return { status: "confirm", code: "READY", workspaceName: workspace.name, branchDeleted: false };
   if (!repo) {
     // Neither the worktree nor its repository is there to check or touch:
     // the row is all that is left, and only the user may drop it.
@@ -869,6 +970,11 @@ async function cleanUpRailWorkspaceOnce(
     if (await holdsOtherWorkspace(repo, workspace, workspace.cwd)) return refused("Another workspace sits inside it.", workspace.name);
   }
 
+  if (normalized.preview) {
+    const found = await registrationOf(repo, workspace.cwd);
+    if (!found) return refused("git does not list this folder as a worktree. Use Delete instead.", workspace.name, "NOT_REGISTERED");
+    return cleanUpRegistered(deps, repo, workspace, found.path, normalized, removeOptions);
+  }
   try {
     // Read the registrations under the lock agent create and remove share,
     // then let go of it: a registered worktree is removed by

@@ -44,6 +44,7 @@ import {
 } from "../git-worktrees";
 import { proveByMergedPullRequestStack } from "../merged-pull-request-stack";
 import { isKeptBranch } from "./kept-branches";
+import type { LeftoverSystem } from "./leftovers";
 import { setupProvidedEntries } from "../worktree-setup/links";
 import { folderIdentity } from "../worktree-folders";
 
@@ -119,6 +120,9 @@ export interface WorktreeCleanupDeps {
   // Why a folder with a drive mounted inside must stay, or null. Absent: the
   // real check (mounts.ts mountRefusal); tests stand in for it here.
   mountRefusal?(path: string): Promise<string | null>;
+  // Reads and stops processes left running in a worktree (leftovers.ts).
+  // Absent, as on Windows: a process inside holds it until it is stopped.
+  leftovers?: LeftoverSystem;
 }
 
 export const ROW_BUDGET_MS = 12_000;
@@ -662,7 +666,11 @@ export async function usageOf(
   }
   const processes = found.filter((entry) => !counted.has(entry.pid));
   if (processes.length) {
-    uses.push({ kind: "process", label: `${count(processes.length, "running process", "running processes")} (${programsText(processes)})` });
+    uses.push({
+      kind: "process",
+      label: `${count(processes.length, "running process", "running processes")} (${programsText(processes)})`,
+      pids: processes.map((entry) => entry.pid),
+    });
   }
 
   if (deps.appPaths().some((appPath) => appPath && isAtOrUnder(appPath, real))) {
@@ -938,7 +946,12 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   if (ctx.requireKnownUsage && usageUnknown(ctx.usage)) {
     block(check, "UNCHECKED", "What is running in it could not be read, so it is not removed on its own. Codara tries again later.");
   }
-  const uses = (await usageOf(ctx.usage, registration.path, real, workspaces)).filter((use) => countsAsUse(use, ctx));
+  const found = await usageOf(ctx.usage, registration.path, real, workspaces);
+  const uses = found.filter((use) => countsAsUse(use, ctx));
+  if (ctx.allowInUse?.has("process")) {
+    const pids = found.flatMap((use) => (use.kind === "process" ? (use.pids ?? []) : []));
+    if (pids.length) check.leftoverPids = pids;
+  }
   const inUse = (held: WorktreeInUse[]) => {
     if (!held.length) return;
     check.inUse = [...(check.inUse ?? []), ...held];

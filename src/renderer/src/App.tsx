@@ -66,6 +66,7 @@ import ToastHost from "./components/Toast";
 import WorkspaceSwitchHud from "./components/WorkspaceSwitchHud";
 import WorktreeCleanupHost from "./components/worktree-cleanup/WorktreeCleanupHost";
 import { openWorktreeCleanup } from "./components/worktree-cleanup/open-worktree-cleanup";
+import type { RailCleanUpAnswer } from "./components/rail/RailCleanUp";
 import { playNotificationSound } from "./components/notification-sounds";
 import TabBar, { TAB_GROUP_MENU_EVENT, type PickerHints, type TabGroupActions } from "./tabs/TabBar";
 import ChatStack from "./tabs/ChatStack";
@@ -4579,7 +4580,7 @@ export default function App() {
   // A removal is confirmed with a toast; anything else comes back to the
   // rail, which shows it next to the button that asked (rail/RailCleanUp).
   const handleCleanUpWorkspace = useCallback(
-    async (id: string, confirmIgnored?: string): Promise<WorktreeRailCleanupResult | null> => {
+    async (id: string, answer?: RailCleanUpAnswer): Promise<WorktreeRailCleanupResult | null> => {
       const target = workspacesRef.current.find((w) => w.id === id);
       if (!target) return null;
       if (!target.copyBranch) {
@@ -4587,7 +4588,7 @@ export default function App() {
         return { status: "removed", workspaceName: target.name, branchDeleted: false };
       }
       const result: WorktreeRailCleanupResult = await window.spark.worktreeCleanup
-        .railCleanUp({ workspaceId: id, mode: "manual", ...(confirmIgnored ? { confirmIgnored } : {}) })
+        .railCleanUp({ ...answer, workspaceId: id, mode: "manual" })
         .catch((cause: unknown) => ({
           status: "failed" as const,
           message: cause instanceof Error ? cause.message : String(cause),
