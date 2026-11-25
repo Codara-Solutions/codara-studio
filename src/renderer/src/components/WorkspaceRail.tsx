@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CSSProperties } from "react";
 import type {
@@ -25,7 +25,14 @@ import { WorkspaceAgentsLine } from "./workspace-status/WorkspaceAgentsLine";
 import { useAgentLinesOf } from "./workspace-status/agentLinesStore";
 import { AgentSleepMenuItem } from "./rail/AgentSleepMenuItem";
 import { Chevron, ExternalWorktreeRow, WorkspaceChildren, WorktreeAgentLine } from "./rail/WorkspaceChildren";
-import { CleanUpConfirm, RailCleanUpNotices, useRailCleanUp, type RailCleanUpAnswer, type RailCleanUpEntry } from "./rail/RailCleanUp";
+import {
+  CleanUpConfirm,
+  RailCleanUpNotices,
+  RailRemovingContext,
+  useRailCleanUp,
+  type RailCleanUpAnswer,
+  type RailCleanUpEntry,
+} from "./rail/RailCleanUp";
 import { setRailFold, useRailFold } from "./rail/railFolds";
 import WorkspaceStatusPicker from "./workspace-status/WorkspaceStatusPicker";
 import { setWorkspaceStatus, useUserWorkspaceStatus } from "./workspace-status/workspaceStatusStore";
@@ -2280,6 +2287,9 @@ function WorkspaceRow({
   const [statusPickerOpen, setStatusPickerOpen] = useState(false);
   const rowCleanUp = useRailCleanUp([ws.id]);
   const cleaning = rowCleanUp.cleaning;
+  // Its own Clean up, or its fold's, is removing it: shown at once.
+  const foldRemoving = useContext(RailRemovingContext).has(ws.id);
+  const removing = cleaning || foldRemoving;
   const statusEntry = useUserWorkspaceStatus(ws.id);
   const prWatch = usePullRequestWatch(ws.id);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
@@ -2432,7 +2442,8 @@ function WorkspaceRow({
       data-workspace-id={ws.id}
       data-active={active ? "true" : undefined}
       data-nested={nested ? "true" : undefined}
-      className={nested ? (faded ? "rail-child rail-child-faded" : "rail-child") : undefined}
+      className={nested ? (faded || removing ? "rail-child rail-child-faded" : "rail-child") : undefined}
+      data-removing={removing ? "true" : undefined}
       draggable={!editing && !nested}
       onDragStart={(event) => {
         // dragstart fires on the row, not on what was pressed: a press that
@@ -2710,7 +2721,7 @@ function WorkspaceRow({
                 <PullRequestMark entry={prWatch} />
               </span>
             </span>
-            {missing ? (
+            {missing && !removing ? (
               <span data-testid="workspace-missing" className="rail-child-line2" style={{ color: "var(--muted)" }}>
                 Folder gone
               </span>
@@ -2722,6 +2733,7 @@ function WorkspaceRow({
                 baseBranch={ws.copyBranch?.baseBranch}
                 active={active}
                 appRunsHere={worktree?.appRunsHere === true}
+                removing={removing}
               />
             )}
             <WorkspaceStatusLine workspaceId={ws.id} active={active} />

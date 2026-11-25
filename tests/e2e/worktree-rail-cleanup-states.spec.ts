@@ -223,7 +223,11 @@ test("Clean up on the merged fold takes every worktree it counts", async ({}, te
     await page.screenshot({ path: testInfo.outputPath("rail-states-ask.png") });
     await confirm.getByRole("button", { name: "Clean up" }).click();
     for (const dir of [deps, squash, made.path]) await expect.poll(() => existsSync(dir), { timeout: 60_000 }).toBe(false);
-    for (const branch of ["feat/deps", "feat/squash", "feat/agent"]) expect(branchExists(repo, branch, gitEnv), branch).toBe(false);
+    // A removal deletes its branch after its folder: the last folder can be
+    // gone a moment before its branch.
+    for (const branch of ["feat/deps", "feat/squash", "feat/agent"]) {
+      await expect.poll(() => branchExists(repo, branch, gitEnv), { message: branch, timeout: 30_000 }).toBe(false);
+    }
 
     await expect(fold).toHaveCount(0, { timeout: 60_000 });
     await expect(notice).toHaveCount(0);
