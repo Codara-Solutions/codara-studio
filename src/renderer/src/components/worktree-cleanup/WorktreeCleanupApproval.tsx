@@ -1,5 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatBytes, plural } from "@shared/worktree-cleanup";
+import type {
+  WorktreeCleanupAgentResult,
+  WorktreeCleanupApprovalItem,
+  WorktreeCleanupApprovalRequest,
+} from "@shared/worktree-cleanup-agent";
 import {
   APPROVAL_BADGE_LABELS,
   approvalAnswerItems,
@@ -12,10 +17,7 @@ import {
   untickAllApprovals,
   type ApprovalBadge,
   type ApprovalChoice,
-  type WorktreeCleanupAgentResult,
-  type WorktreeCleanupApprovalItem,
-  type WorktreeCleanupApprovalRequest,
-} from "@shared/worktree-cleanup-agent";
+} from "@shared/worktree-cleanup-approval";
 import { Spinner } from "../git/git-ui";
 import { ResultsView } from "./WorktreeReview";
 import { Badge, rowTitle, type BadgeTone } from "./WorktreeRow";
@@ -83,7 +85,7 @@ function ApprovalItem({
       <div className="wtc-review-detail">{item.reason}</div>
       <div className="wtc-review-effect" data-testid="worktree-cleanup-effect">
         <span className="wtc-review-note">If ticked: </span>
-        {tickEffect(item, deleteMergedBranches)}
+        {tickEffect(item, deleteMergedBranches, choice.remove && choice.deleteRemoteBranch)}
       </div>
       {item.ignored.length ? (
         <div className="wtc-review-note">{`Removing it deletes these ignored files: ${item.ignored.join(", ")}.`}</div>

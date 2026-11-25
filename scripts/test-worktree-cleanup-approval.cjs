@@ -2,7 +2,7 @@
 "use strict";
 
 // The agent's "Remove worktrees?" dialog (WorktreeCleanupApproval.tsx) and
-// the pure rules behind it in src/shared/worktree-cleanup-agent.ts:
+// the pure rules behind it in src/shared/worktree-cleanup-approval.ts:
 //   - the agent's one line is cleaned, capped and shown as text, never markup
 //   - rows that can go come first, safe ones leading; rows that cannot fold
 //     into one line at the bottom, counted by cause
@@ -24,6 +24,7 @@ async function load() {
     stdin: {
       contents:
         'export * from "./src/shared/worktree-cleanup-agent";\n' +
+        'export * from "./src/shared/worktree-cleanup-approval";\n' +
         'export { default as WorktreeCleanupApproval } from "./src/renderer/src/components/worktree-cleanup/WorktreeCleanupApproval";\n' +
         'export { renderToStaticMarkup } from "react-dom/server";\nexport { createElement } from "react";',
       resolveDir: ROOT,
@@ -86,7 +87,8 @@ async function main() {
 
   check("the agent's line is one plain line of at most 200 characters", () => {
     assert.equal(m.agentReasonLine("  Remove the 17 merged ones,\nas you approved.  "), "Remove the 17 merged ones, as you approved.");
-    assert.equal(m.agentReasonLine("a‮b​c\u0007d"), "a b c d", "direction, zero-width and control characters go");
+    assert.equal(m.agentReasonLine("a\u202eb\u200bc\u0007d"), "a b c d", "direction, zero-width and control characters go");
+    assert.equal(m.agentReasonLine("-5\u061c GB"), "-5 GB", "the Arabic letter mark goes too");
     assert.equal(m.agentReasonLine("<b>bold</b> & <script>x</script>"), "<b>bold</b> & <script>x</script>", "markup is kept as text for React to escape");
     assert.equal(m.agentReasonLine("   "), null);
     assert.equal(m.agentReasonLine(42), null);
@@ -175,7 +177,20 @@ async function main() {
       "Folder goes. The branch stays, with its 1 commit that is not merged.",
     );
     assert.equal(m.tickEffect(item("a", { branch: null, merged: false, unmergedCommits: 1 }), true), "Folder goes. Its 1 commit stays recoverable for 30 days.");
-    assert.equal(m.tickEffect(item("a", { missing: true }), true), "The folder is already gone: only git's record of it goes.");
+    // A folder already gone still takes its merged branch with it.
+    assert.equal(m.tickEffect(item("a", { missing: true }), true), "Merged: folder (already gone) and local branch go. The branch on GitHub stays.");
+    assert.equal(m.tickEffect(item("a", { missing: true, branch: null, merged: false }), true), "Folder (already gone) goes.");
+    // The remote wording follows the row's own tick.
+    const offeredRemote = { offered: true, reason: "Pull request #12 merged it.", name: "origin", suggested: false };
+    assert.equal(
+      m.tickEffect(item("a", { remote: offeredRemote }), true, true),
+      "Merged: folder and local branch go. The branch on GitHub goes too.",
+    );
+    // Commits added locally after the pull request merged: the local branch
+    // stays, and the merged remote tip may still be deleted.
+    const later = item("a", { merged: false, unmergedCommits: 2, remote: offeredRemote });
+    assert.equal(m.tickEffect(later, true, false), "Folder goes. The branch stays, here and on GitHub. Tick below to delete it there.");
+    assert.equal(m.tickEffect(later, true, true), "Folder goes. The local branch stays, with its 2 commits that are not merged; the branch on GitHub goes.");
   });
 
   check("the dialog shows the agent's words escaped, the rows that can go, and folds the rest", () => {
