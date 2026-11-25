@@ -97,7 +97,7 @@ async function prepare(): Promise<Fixture> {
         state: "open",
         draft: false,
         merged_at: null,
-        head: { sha: prHead, ref: "feat/widgets" },
+        head: { sha: prHead, ref: "feat/widgets", label: "acme:feat/widgets" },
       },
     ]),
   );
@@ -111,14 +111,23 @@ async function prepare(): Promise<Fixture> {
   );
   await writeFile(join(ghDir, "status.json"), JSON.stringify({ state: "pending", statuses: [] }));
   // `gh api --include --method GET <path>` with REST headers on stdout, as
-  // the real one prints them. Only feat/widgets has a pull request.
+  // the real one prints them, and GraphQL for the rest. Only feat/widgets has a
+  // pull request.
   await writeExecutable(
     join(binDir, "gh"),
     `#!/bin/sh
 case "$1" in
   --version) echo "gh version 2.102.1 (2026-10-20)"; exit 0 ;;
   auth) echo "github.com: Logged in to github.com account e2e"; exit 0 ;;
-  api) ;;
+  api) [ "$2" = "graphql" ] && {
+    # One query for the branches with no open pull request: none has one.
+    fields=""
+    for arg in "$@"; do
+      case "$arg" in b[0-9]*=*) fields="$fields$(printf '"%s":{"nodes":[]},' "\${arg%%=*}")" ;; esac
+    done
+    printf '{"data":{"repository":{%s"parent":null}}}' "$fields"
+    exit 0
+  } ;;
   pr) [ "$2" = "list" ] && { printf '[]'; exit 0; }; echo "no pull requests found" >&2; exit 1 ;;
   issue) printf '[]'; exit 0 ;;
   repo) printf '%s' '{"nameWithOwner":"acme/widgets","url":"https://github.com/acme/widgets","defaultBranchRef":{"name":"main"}}'; exit 0 ;;
@@ -135,6 +144,7 @@ while [ $# -gt 0 ]; do
 done
 case "$path" in
   repos/acme/widgets/pulls\\?*head=acme%3Afeat%2Fwidgets*) file='${join(ghDir, "pulls.json")}' ;;
+  repos/acme/widgets/pulls\\?state=open*) file='${join(ghDir, "pulls.json")}' ;;
   repos/acme/widgets/pulls\\?*) file='${join(ghDir, "none.json")}' ;;
   repos/acme/widgets/commits/*/check-runs*) file='${join(ghDir, "runs.json")}' ;;
   repos/acme/widgets/commits/*/status*) file='${join(ghDir, "status.json")}' ;;

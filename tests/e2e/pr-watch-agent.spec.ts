@@ -97,7 +97,7 @@ test("a failing check reaches the agent on its branch once it is free, and the r
       await shot(page, "row-passing");
       await expect.poll(async () => (await calls(fixture)).filter((call) => call.startsWith("304 ")).length, { timeout: 15_000 }).toBeGreaterThan(3);
       const log = await calls(fixture);
-      expect(log.some((call) => call.includes("repos/acme/widgets/pulls?head=acme%3Afeat%2Fwidgets"))).toBe(true);
+      expect(log.some((call) => call.includes("repos/acme/widgets/pulls?state=open"))).toBe(true);
       expect(log.some((call) => call.includes(`repos/acme/widgets/commits/${fixture.head}/check-runs`))).toBe(true);
     });
 
@@ -214,7 +214,7 @@ async function prepare(): Promise<Fixture> {
         state: "open",
         draft: false,
         merged_at: null,
-        head: { sha: head, ref: "feat/widgets" },
+        head: { sha: head, ref: "feat/widgets", label: "acme:feat/widgets" },
       },
     ]),
     "utf8",
@@ -230,7 +230,16 @@ async function prepare(): Promise<Fixture> {
 case "$1" in
   --version) echo "gh version 2.102.1 (2026-10-20)"; exit 0 ;;
   auth) echo "github.com: Logged in to github.com account e2e"; exit 0 ;;
-  api) ;;
+  api) [ "$2" = "graphql" ] && {
+    # One query for the branches with no open pull request: none has one.
+    fields=""
+    for arg in "$@"; do
+      case "$arg" in b[0-9]*=*) fields="$fields$(printf '"%s":{"nodes":[]},' "\${arg%%=*}")" ;; esac
+    done
+    echo "graphql" >> '${calls}'
+    printf '{"data":{"repository":{%s"parent":null}}}' "$fields"
+    exit 0
+  } ;;
   pr) [ "$2" = "list" ] && { printf '[]'; exit 0; }; echo "no pull requests found" >&2; exit 1 ;;
   issue) printf '[]'; exit 0 ;;
   repo) printf '%s' '{"nameWithOwner":"acme/widgets","url":"https://github.com/acme/widgets","defaultBranchRef":{"name":"main"}}'; exit 0 ;;

@@ -1491,7 +1491,7 @@ async function main() {
   // The worktree idle clock: a finished turn is not "now", and it outlives
   // its pane, found by workspace or by the folder it ran in.
   const inProgress = (workspaceId) => workspaceId === "ws-progress";
-  const inTree = (_workspaceId, cwd) => cwd === "/work/tree";
+  const inTree = (_workspaceId, cwds) => cwds.includes("/work/tree");
   const endedAt = mod.terminalAgentLastTurnAt(inProgress);
   check("idle clock: a finished turn is when it was", typeof endedAt === "number" && endedAt <= Date.now());
   await sleep(60_000);
@@ -1500,6 +1500,23 @@ async function main() {
   mod.syncTerminalNotifyPanes({ workspaceId: "ws-progress", panes: [] });
   check("idle clock: the turn outlives its closed pane", mod.terminalAgentLastTurnAt(inProgress) === endedAt);
   check("idle clock: other workspaces see none of it", mod.terminalAgentLastTurnAt((id) => id === "ws-none") === null);
+  // Working reads as now; a pane closed mid-turn ends its turn at the close,
+  // with no finish announced.
+  T.cwds.set("closing", "/work/other");
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-closing", panes: [
+    { paneId: "closing", tabId: "tc", tabTitle: "claude", excluded: false, runtimeHint: "claude" },
+  ] });
+  const inClosing = (workspaceId) => workspaceId === "ws-closing";
+  mod.noteTerminalUserInput("closing", "refactor the parser\r");
+  feed("closing", "\x1b]9;4;1;10\x07");
+  await sleep(1500);
+  check("idle clock: a turn that runs reads as now", mod.terminalAgentLastTurnAt(inClosing) === Date.now());
+  await sleep(3_000);
+  check("idle clock: still in its turn", mod.terminalAgentLastTurnAt(inClosing) === Date.now());
+  const closedAt = Date.now();
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-closing", panes: [] });
+  await sleep(60_000);
+  check("idle clock: a pane closed mid-turn ends the turn at the close", mod.terminalAgentLastTurnAt(inClosing) === closedAt);
 
   mod.disposeAllTerminalAgentWatchers();
   check("explicit watcher disposal detaches every tap", T.taps.size === 0);

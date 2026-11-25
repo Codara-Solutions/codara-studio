@@ -1069,7 +1069,7 @@ test("readRepositoryPullRequests: one open list and one query for every other br
     },
   };
   const item = (branch) => ({ cwd: `/${branch}`, refs: { key: "k", host: "github.com", repository: "acme/widgets", branch } });
-  const quiet = Array.from({ length: 20 }, (_, i) => item(`feat/quiet-${i}`));
+  const quiet = Array.from({ length: 41 }, (_, i) => item(`feat/quiet-${i}`));
   const answers = await mod.readRepositoryPullRequests(reader, [item("feat/a"), item("feat/b"), item("feat/c"), item("feat/none"), item("feat/Widget"), ...quiet]);
   assert.equal(answers.get("/feat/a").number, 3);
   assert.deepEqual(answers.get("/feat/a").failed, [], "a cancelled run is no failure");
@@ -1081,7 +1081,7 @@ test("readRepositoryPullRequests: one open list and one query for every other br
   assert.equal(answers.get("/feat/Widget"), null, "feat/widget's pull request is not feat/Widget's");
   for (const row of quiet) assert.equal(answers.get(row.cwd), null);
   const lists = calls.filter((url) => url.includes("pulls?state=") || url === "graphql" || url.includes("pulls?head="));
-  assert.deepEqual(lists.map((url) => (url === "graphql" ? url : url.split("?")[1].split("&")[0])), ["state=open", "graphql"], "25 rows: one open list and one query");
+  assert.deepEqual(lists.map((url) => (url === "graphql" ? url : url.split("?")[1].split("&")[0])), ["state=open", "graphql"], "46 rows: one open list and one query");
   assert.equal(queries[0].owner, "acme");
   assert.ok(Object.values(queries[0]).includes("feat/Widget"));
   // The owner in any case is the same owner.
@@ -1098,21 +1098,56 @@ test("readRepositoryPullRequests: one open list and one query for every other br
   const forked = (await mod.readRepositoryPullRequests(fork, [item("feat/f")])).get("/feat/f");
   assert.equal(forked.repository, "upstream/widgets");
   assert.equal(forked.number, 40);
-  // A page full of other forks' same-named branches proves nothing: asked alone.
+  // A page full of other forks' same-named branches proves nothing, not even
+  // a parent's pull request: an older one of its own may be past the page.
   calls.length = 0;
-  const crowded = { get: reader.get, graphql: async () => ({ data: { repository: { b0: { nodes: Array.from({ length: 10 }, (_, i) => node(100 + i, `fork-${i}`)) }, parent: null } } }) };
-  assert.equal((await mod.readRepositoryPullRequests(crowded, [item("main")])).get("/main"), null);
+  const crowdedPage = { nodes: Array.from({ length: 10 }, (_, i) => node(100 + i, `fork-${i}`)) };
+  const crowded = {
+    get: async (url) => (url.includes("pulls?head=") ? (calls.push(url), { value: [listed(6, "main", { state: "closed" })] }) : reader.get(url)),
+    graphql: async () => ({ data: { repository: { b0: crowdedPage, parent: { b0: { nodes: [node(50, "acme", { url: "https://github.com/upstream/widgets/pull/50" })] } } } } }),
+  };
+  assert.equal((await mod.readRepositoryPullRequests(crowded, [item("main")])).get("/main").number, 6, "its own, asked alone");
   assert.equal(calls.filter((url) => url.includes("pulls?head=")).length, 1);
-  // A refused query, or no query at all: each branch is asked alone, as before.
+  // A refused query errs its rows, to be asked again after the backoff, and
+  // asks no branch alone.
   calls.length = 0;
-  await mod.readRepositoryPullRequests({ get: reader.get, graphql: async () => { throw new Error("HTTP 502"); } }, [item("feat/none"), item("feat/other")]);
-  assert.equal(calls.filter((url) => url.includes("pulls?head=")).length, 2);
+  const refused = await mod.readRepositoryPullRequests({ get: reader.get, graphql: async () => { throw new Error("HTTP 502"); } }, [item("feat/a"), item("feat/none"), item("feat/other")]);
+  assert.equal(refused.get("/feat/a").number, 3, "an open one is still answered");
+  assert.ok(refused.get("/feat/none") instanceof Error && refused.get("/feat/other") instanceof Error);
+  assert.equal(calls.filter((url) => url.includes("pulls?head=")).length, 0);
+  // Without a query at all, each branch is asked alone, as before.
   calls.length = 0;
   await mod.readRepositoryPullRequests({ get: reader.get }, [item("feat/none")]);
   assert.equal(calls.filter((url) => url.includes("pulls?head=")).length, 1);
   // The open list failing errs every row of the read.
   const broken = await mod.readRepositoryPullRequests({ get: async () => { throw new Error("HTTP 502"); } }, [item("feat/a"), item("feat/b")]);
   assert.ok([...broken.values()].every((value) => value instanceof Error));
+});
+
+test("readRepositoryPullRequests answers each row as soon as its checks are read", async ({ mod }) => {
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  const listed = (number, branch, sha) => ({
+    number, state: "open", draft: false, merged_at: null, title: `PR ${number}`,
+    html_url: `https://github.com/acme/widgets/pull/${number}`, head: { sha, label: `acme:${branch}` },
+  });
+  const SLOW = "c".repeat(40);
+  const reader = {
+    get: async (url) => {
+      if (url.includes("pulls?state=open")) return { value: [listed(1, "feat/slow", SLOW), listed(2, "feat/fast", HEAD_A)] };
+      if (url.includes(`/commits/${SLOW}/`)) await held;
+      if (url.includes("/check-runs")) return { value: { check_runs: [run("build", "completed", "success")] } };
+      return { value: { statuses: [] } };
+    },
+  };
+  const item = (branch) => ({ cwd: `/${branch}`, refs: { key: "k", host: "github.com", repository: "acme/widgets", branch } });
+  const heard = [];
+  const reading = mod.readRepositoryPullRequests(reader, [item("feat/slow"), item("feat/fast")], undefined, (cwd, pr) => heard.push([cwd, pr.number]));
+  for (let i = 0; i < 20; i += 1) await Promise.resolve();
+  assert.deepEqual(heard, [["/feat/fast", 2]], "the fast row is answered while the slow one reads");
+  release();
+  await reading;
+  assert.deepEqual(heard.map(([cwd]) => cwd), ["/feat/fast", "/feat/slow"]);
 });
 
 test("a repository's rows apply as soon as its read is back, whatever another repository does", async ({ mod }) => {
@@ -1144,6 +1179,38 @@ test("a repository's rows apply as soon as its read is back, whatever another re
   release();
   await passing;
   assert.equal(shown().get("ws-slow"), 8);
+});
+
+test("a row the read answers early applies before the rest of its repository", async ({ mod }) => {
+  const rows = [ws("ws-early", "/early"), ws("ws-late", "/late")];
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  const watch = mod.createGitHubCiWatch({
+    loadState: async () => ({ workspaces: rows, workspaceGroups: [], activeWorkspaceId: null }),
+    enabled: () => true,
+    pathExists: async () => true,
+    localRefs: async (cwd) => ({ key: `${cwd} u`, host: "github.com", repository: "acme/widgets", branch: `feat${cwd}` }),
+    readPullRequest: async () => null,
+    readPullRequests: async (items, answer) => {
+      answer("/early", pr(HEAD_A, { number: 7 }));
+      await held;
+      return new Map([["/early", pr(HEAD_A, { number: 99 })], ["/late", pr(HEAD_A, { number: 8 })]]);
+    },
+    publish: () => undefined,
+    rearm: () => undefined,
+    now: () => 0,
+    setTimeout: () => ({}),
+    clearTimeout: () => undefined,
+    log: () => undefined,
+  });
+  const passing = watch.runPass();
+  for (let i = 0; i < 20; i += 1) await Promise.resolve();
+  const shown = () => new Map(watch.entries().map((entry) => [entry.workspaceId, entry.pullRequest?.number]));
+  assert.equal(shown().get("ws-early"), 7);
+  release();
+  await passing;
+  assert.equal(shown().get("ws-early"), 7, "answered once: the map does not apply it again");
+  assert.equal(shown().get("ws-late"), 8);
 });
 
 test("a cancelled or stale run is no failure; the newest run of a check decides", ({ mod }) => {

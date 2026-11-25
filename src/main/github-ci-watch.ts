@@ -126,9 +126,13 @@ export interface GitHubCiWatchDeps {
   /**
    * The pull requests of several branches of one repository, read together,
    * by cwd: what readPullRequest answers, or an Error. A cwd left out reads
-   * as an error. Absent: readPullRequest for each.
+   * as an error. Absent: readPullRequest for each. `answer`, when given,
+   * hears each row as soon as it is read, before the read is over.
    */
-  readPullRequests?(items: ReadonlyArray<{ cwd: string; refs: CiLocalRefs }>): Promise<Map<string, CiPullRequestSnapshot | null | Error>>;
+  readPullRequests?(
+    items: ReadonlyArray<{ cwd: string; refs: CiLocalRefs }>,
+    answer?: (cwd: string, pr: CiPullRequestSnapshot | null | Error) => void,
+  ): Promise<Map<string, CiPullRequestSnapshot | null | Error>>;
   publish(input: CiNotifyInput): void;
   rearm(sourceKey: string): void;
   /** A workspace's row changed; null when it has nothing to show. */
@@ -533,8 +537,16 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
     const batches = [...byRepository.values()];
     const readBatch = async (batch: Array<{ cwd: string; refs: CiLocalRefs }>): Promise<void> => {
       if (deps.readPullRequests) {
-        const read = await deps.readPullRequests(batch).catch(asError);
+        const heard = new Set<string>();
+        const read = await deps
+          .readPullRequests(batch, (cwd, pr) => {
+            if (heard.has(cwd) || !batch.some((item) => item.cwd === cwd)) return;
+            heard.add(cwd);
+            answer(cwd, pr);
+          })
+          .catch(asError);
         for (const { cwd } of batch) {
+          if (heard.has(cwd)) continue;
           answer(cwd, read instanceof Error ? read : read.has(cwd) ? read.get(cwd)! : new Error("GitHub gave no answer for this branch"));
         }
         return;
@@ -874,10 +886,10 @@ export function ghConfigDir(home: string): string {
 
 const PULLS_PAGE = 100;
 const PULLS_JQ = "[.[] | {number, state, draft, merged_at, html_url, title, head: {sha: .head.sha, label: .head.label}}]";
-// Branches asked about in one GraphQL query, and the pull requests read per
-// branch name (other forks' branches of the same name included).
-const BRANCHES_PER_QUERY = 40;
+// The pull requests read per branch name (other forks' branches of the same
+// name included), and the rows whose checks are read at the same time.
 const PULLS_PER_BRANCH = 10;
+const CHECK_READS_AT_ONCE = 4;
 
 type PullRequestReader = {
   get(path: string, options?: { jq?: string }): Promise<{ value: unknown }>;
@@ -924,8 +936,8 @@ const GRAPHQL_PULL = `nodes { number state isDraft mergedAt url title headRefOid
 /**
  * The newest pull request of each branch, open or not, in the repository or,
  * for a branch with none there, in the parent it was forked from: one GraphQL
- * query per BRANCHES_PER_QUERY branches. A branch whose page of same-named
- * pull requests is full without one of its own is left out (asked alone).
+ * query for all of them. A branch whose page of same-named pull requests in
+ * the repository is full without one of its own is left out (asked alone).
  */
 async function branchesPulls(
   reader: PullRequestReader & { graphql: NonNullable<PullRequestReader["graphql"]> },
@@ -934,59 +946,64 @@ async function branchesPulls(
 ): Promise<Map<string, ReturnType<typeof parseRestPullRequest>>> {
   const [owner, name] = repository.split("/");
   const found = new Map<string, ReturnType<typeof parseRestPullRequest>>();
-  for (let start = 0; start < branches.length; start += BRANCHES_PER_QUERY) {
-    const chunk = branches.slice(start, start + BRANCHES_PER_QUERY);
-    const variables: Record<string, string> = { owner, name };
-    const fields = chunk.map((branch, i) => {
-      variables[`b${i}`] = branch;
-      return `b${i}: pullRequests(headRefName: $b${i}, first: ${PULLS_PER_BRANCH}, orderBy: {field: CREATED_AT, direction: DESC}) { ${GRAPHQL_PULL} }`;
-    });
-    const query = `query(${["$owner: String!", "$name: String!", ...chunk.map((_, i) => `$b${i}: String!`)].join(", ")}) { repository(owner: $owner, name: $name) { ${fields.join(" ")} parent { ${fields.join(" ")} } } }`;
-    const repo = record(record(record(await reader.graphql(query, variables))?.data)?.repository);
-    if (!repo) throw new Error(`GitHub found no repository ${repository}`);
-    chunk.forEach((branch, i) => {
-      const pick = (place: unknown): { pull: ReturnType<typeof parseRestPullRequest>; complete: boolean } => {
-        const nodes = record(record(place)?.[`b${i}`])?.nodes;
-        if (!Array.isArray(nodes)) return { pull: null, complete: place == null };
-        const rest = nodes.flatMap((node) => {
-          const pull = record(node);
-          const login = text(record(pull?.headRepositoryOwner)?.login);
-          if (!pull || !sameHead(`${login}:${branch}`, owner, branch)) return [];
-          return [{
-            number: pull.number,
-            state: pull.state === "OPEN" ? "open" : "closed",
-            draft: pull.isDraft === true,
-            merged_at: pull.mergedAt ?? null,
-            html_url: pull.url,
-            title: pull.title,
-            head: { sha: pull.headRefOid, label: `${login}:${branch}` },
-          }];
-        });
-        return { pull: parseRestPullRequest(rest), complete: rest.length > 0 || nodes.length < PULLS_PER_BRANCH };
-      };
-      const own = pick(repo);
-      if (own.pull) return void found.set(branch, own.pull);
-      const parent = pick(repo.parent);
-      if (parent.pull) return void found.set(branch, parent.pull);
-      if (own.complete && parent.complete) found.set(branch, null);
-    });
-  }
+  const variables: Record<string, string> = { owner, name };
+  const fields = branches.map((branch, i) => {
+    variables[`b${i}`] = branch;
+    return `b${i}: pullRequests(headRefName: $b${i}, first: ${PULLS_PER_BRANCH}, orderBy: {field: CREATED_AT, direction: DESC}) { ${GRAPHQL_PULL} }`;
+  });
+  const query = `query(${["$owner: String!", "$name: String!", ...branches.map((_, i) => `$b${i}: String!`)].join(", ")}) { repository(owner: $owner, name: $name) { ${fields.join(" ")} parent { ${fields.join(" ")} } } }`;
+  const repo = record(record(record(await reader.graphql(query, variables))?.data)?.repository);
+  if (!repo) throw new Error(`GitHub found no repository ${repository}`);
+  branches.forEach((branch, i) => {
+    const pick = (place: unknown): { pull: ReturnType<typeof parseRestPullRequest>; complete: boolean } => {
+      const nodes = record(record(place)?.[`b${i}`])?.nodes;
+      if (!Array.isArray(nodes)) return { pull: null, complete: place == null };
+      const rest = nodes.flatMap((node) => {
+        const pull = record(node);
+        const login = text(record(pull?.headRepositoryOwner)?.login);
+        if (!pull || !sameHead(`${login}:${branch}`, owner, branch)) return [];
+        return [{
+          number: pull.number,
+          state: pull.state === "OPEN" ? "open" : "closed",
+          draft: pull.isDraft === true,
+          merged_at: pull.mergedAt ?? null,
+          html_url: pull.url,
+          title: pull.title,
+          head: { sha: pull.headRefOid, label: `${login}:${branch}` },
+        }];
+      });
+      return { pull: parseRestPullRequest(rest), complete: rest.length > 0 || nodes.length < PULLS_PER_BRANCH };
+    };
+    const own = pick(repo);
+    if (own.pull) return void found.set(branch, own.pull);
+    // An older one of its own may be past a full page: the parent's proves nothing yet.
+    if (!own.complete) return;
+    const parent = pick(repo.parent);
+    if (parent.pull) return void found.set(branch, parent.pull);
+    if (parent.complete) found.set(branch, null);
+  });
   return found;
 }
 
 /**
  * GitHubCiWatchDeps.readPullRequests over GitHub's API, for rows of one
  * repository: its open pull requests in one conditional REST read, shared by
- * all of them; the branches with none open in one GraphQL query; a branch
- * neither settles is asked about alone, as readPullRequest does. Then the
- * checks of each open one.
+ * all of them; the branches with none open in one GraphQL query (a refused
+ * query errs their rows); a branch neither settles is asked about alone, as
+ * readPullRequest does. Then the checks of each open one, each row answered
+ * as soon as it is read.
  */
 export async function readRepositoryPullRequests(
   reader: PullRequestReader,
   items: ReadonlyArray<{ cwd: string; refs: CiLocalRefs }>,
   failure: (cause: unknown) => Error = (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+  answer?: (cwd: string, pr: CiPullRequestSnapshot | null | Error) => void,
 ): Promise<Map<string, CiPullRequestSnapshot | null | Error>> {
   const answers = new Map<string, CiPullRequestSnapshot | null | Error>();
+  const settle = (cwd: string, value: CiPullRequestSnapshot | null | Error) => {
+    answers.set(cwd, value);
+    answer?.(cwd, value);
+  };
   if (!items.length) return answers;
   const { repository } = items[0].refs;
   const [owner] = repository.split("/");
@@ -995,7 +1012,7 @@ export async function readRepositoryPullRequests(
     const value = (await reader.get(`repos/${repository}/pulls?state=open&per_page=${PULLS_PAGE}`, { jq: PULLS_JQ })).value;
     open = Array.isArray(value) ? value : [];
   } catch (cause) {
-    for (const { cwd } of items) answers.set(cwd, failure(cause));
+    for (const { cwd } of items) settle(cwd, failure(cause));
     return answers;
   }
   const openPull = (branch: string) =>
@@ -1007,19 +1024,31 @@ export async function readRepositoryPullRequests(
   const pulls = new Map(items.map(({ refs }) => [refs.branch, openPull(refs.branch)]));
   const rest = [...new Set(items.map(({ refs }) => refs.branch).filter((branch) => !pulls.get(branch)))];
   let settled = new Map<string, ReturnType<typeof parseRestPullRequest>>();
+  let refused: Error | null = null;
   if (rest.length && reader.graphql) {
-    // A query GitHub refuses leaves each branch to be asked alone.
-    settled = await branchesPulls(reader as Parameters<typeof branchesPulls>[0], repository, rest).catch(() => settled);
+    // A refused query errs its rows, which wait out the error backoff, rather
+    // than asking each branch alone.
+    settled = await branchesPulls(reader as Parameters<typeof branchesPulls>[0], repository, rest).catch((cause) => {
+      refused = failure(cause);
+      return settled;
+    });
   }
-  for (const { cwd, refs } of items) {
+  const readRow = async ({ cwd, refs }: { cwd: string; refs: CiLocalRefs }): Promise<void> => {
     try {
       let pull = pulls.get(refs.branch) ?? null;
+      if (!pull && refused) return settle(cwd, refused);
       if (!pull) pull = settled.has(refs.branch) ? settled.get(refs.branch)! : await branchPull(reader, refs);
-      answers.set(cwd, pull ? await withChecks(reader, pull) : null);
+      settle(cwd, pull ? await withChecks(reader, pull) : null);
     } catch (cause) {
-      answers.set(cwd, failure(cause));
+      settle(cwd, failure(cause));
     }
-  }
+  };
+  // Each row as soon as its checks are read: a slow one holds up no other.
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) await readRow(items[next++]);
+  };
+  await Promise.all(Array.from({ length: Math.min(CHECK_READS_AT_ONCE, items.length) }, worker));
   return answers;
 }
 
@@ -1211,11 +1240,14 @@ async function productionDeps(): Promise<{ deps: GitHubCiWatchDeps; stop: () => 
         throw new Error(github.sanitizeGitHubFailure(cause, "gh failed"));
       }
     },
-    async readPullRequests(items) {
+    async readPullRequests(items, answer) {
       const executablePath = await resolveBinary("gh");
       if (!executablePath || !items.length) return new Map(items.map(({ cwd }) => [cwd, null]));
-      return readRepositoryPullRequests(readerFor(executablePath, items[0].refs.host), items, (cause) =>
-        new Error(github.sanitizeGitHubFailure(cause, "gh failed")),
+      return readRepositoryPullRequests(
+        readerFor(executablePath, items[0].refs.host),
+        items,
+        (cause) => new Error(github.sanitizeGitHubFailure(cause, "gh failed")),
+        answer,
       );
     },
     publish: (input) => notify.publish(input),

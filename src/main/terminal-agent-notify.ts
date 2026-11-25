@@ -601,6 +601,8 @@ function removeWatcher(paneId: string): void {
   const w = watchers.get(paneId);
   if (!w) return;
   tanLog(`pane=${paneId} watcher removed`);
+  // Closed mid-turn: the turn ends now.
+  if (w.lastEmittedState !== null && CLOCK_ACTIVE.has(w.lastEmittedState)) noteTurnAt(w, Date.now());
   watchers.delete(paneId);
   for (const listener of paneRemovedListeners) {
     try {
@@ -2542,6 +2544,8 @@ function emitPaneState(w: PaneWatcher, chipState: RuntimeState): void {
   const previousState = w.lastEmittedState;
   w.lastEmittedState = chipState;
   const now = Date.now();
+  // A turn's start and its end, however it ended (done, interrupted, gone).
+  if ((previousState !== null && CLOCK_ACTIVE.has(previousState)) || CLOCK_ACTIVE.has(chipState)) noteTurnAt(w, now);
   const workingSince = nextWorkingSince(previousState, chipState, w.activity.workingSince, now);
   // A prompt answered or gone takes its question with it.
   noteActivity(
@@ -2771,47 +2775,56 @@ export function terminalAgentActivitySnapshot(): TerminalAgentActivity[] {
 }
 
 // When each pane's agent last started or ended a turn, and in which
-// workspace and folder: kept after the pane closes or its agent restarts,
+// workspace and folders: kept after the pane closes or its agent restarts,
 // for the worktree idle clock. Newest last; the oldest go past the cap.
 const TURN_LEDGER_MAX = 500;
-const turnLedger = new Map<string, { at: number; workspaceId: string; cwd: string | null }>();
+const turnLedger = new Map<string, { at: number; workspaceId: string; cwds: string[] }>();
+// The chip states of an agent in a turn, or working on in the background.
+const CLOCK_ACTIVE: ReadonlySet<RuntimeState> = new Set<RuntimeState>(["working", "background", "blocked", "stalled"]);
+
+// Where the pane's shell was started and, where the system says, where it is
+// now (after a cd): an agent it started works in the second.
+function paneCwds(paneId: string): string[] {
+  const cwds: string[] = [];
+  try {
+    const start = pty.sessionCwd(paneId);
+    if (start) cwds.push(start);
+    const pid = process.platform === "linux" ? pty.sessionPid(paneId) : null;
+    if (pid) {
+      const now = fs.readlinkSync(`/proc/${pid}/cwd`);
+      if (now && !cwds.includes(now)) cwds.push(now);
+    }
+  } catch {
+    // A pane gone or a process that exited: the folders known so far.
+  }
+  return cwds;
+}
 
 function noteTurnAt(w: PaneWatcher, at: number): void {
   // Replayed output is history, not a turn now.
   if (w.excluded || !w.runtime || w.replayingTail) return;
-  let cwd: string | null = null;
-  try {
-    cwd = pty.sessionCwd(w.paneId);
-  } catch {
-    cwd = null;
-  }
   const before = turnLedger.get(w.paneId);
   turnLedger.delete(w.paneId);
-  // A pane that moved on keeps the folder it last worked in.
-  turnLedger.set(w.paneId, { at: Math.max(at, before?.at ?? 0), workspaceId: w.workspaceId, cwd: cwd ?? before?.cwd ?? null });
+  const cwds = [...new Set([...paneCwds(w.paneId), ...(before?.workspaceId === w.workspaceId ? before.cwds : [])])].slice(0, 4);
+  turnLedger.set(w.paneId, { at: Math.max(at, before?.at ?? 0), workspaceId: w.workspaceId, cwds });
   while (turnLedger.size > TURN_LEDGER_MAX) turnLedger.delete(turnLedger.keys().next().value as string);
 }
 
 /**
- * When an agent `include` takes (by its workspace and folder) last had a
- * turn: now while one runs, else when its last turn started or ended, also
- * for a pane closed since; null when none did since Codara started.
+ * When an agent `include` takes (by its workspace and the folders it ran in)
+ * last had a turn: now while one runs or works in the background, else when
+ * its last turn started or ended, also for a pane closed since; null when
+ * none did since Codara started.
  */
-export function terminalAgentLastTurnAt(include: (workspaceId: string, cwd: string | null) => boolean, now = Date.now()): number | null {
+export function terminalAgentLastTurnAt(include: (workspaceId: string, cwds: readonly string[]) => boolean, now = Date.now()): number | null {
   let latest: number | null = null;
   const seen = (at: number) => {
     if (at > 0 && (latest === null || at > latest)) latest = at;
   };
-  for (const entry of turnLedger.values()) if (include(entry.workspaceId, entry.cwd)) seen(entry.at);
+  for (const entry of turnLedger.values()) if (include(entry.workspaceId, entry.cwds)) seen(entry.at);
   for (const w of watchers.values()) {
-    if (w.excluded || w.disposing || !w.runtime || !turnActive(w)) continue;
-    let cwd: string | null = null;
-    try {
-      cwd = pty.sessionCwd(w.paneId);
-    } catch {
-      cwd = null;
-    }
-    if (include(w.workspaceId, cwd)) seen(now);
+    if (w.excluded || w.disposing || !w.runtime || w.lastEmittedState === null || !CLOCK_ACTIVE.has(w.lastEmittedState)) continue;
+    if (include(w.workspaceId, paneCwds(w.paneId))) seen(now);
   }
   return latest;
 }
