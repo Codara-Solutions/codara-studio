@@ -162,9 +162,8 @@ export async function antigravitySleepVerdict(
   if (AGY_NOT_INTERACTIVE_RE.test(agentCommand)) {
     return { ok: false, reason: "other-processes", detail: "agy is not an interactive session" };
   }
-  if (!isAntigravityConversationId(conversationId)) return judgeAntigravitySleep(conversationId, null, undefined);
   const open = await read.open(agentPid).catch(() => null);
-  return judgeAntigravitySleep(conversationId, open, read.activity(conversationId));
+  return judgeAntigravitySleep(conversationId, open, isAntigravityConversationId(conversationId) ? read.activity(conversationId) : undefined);
 }
 
 /**

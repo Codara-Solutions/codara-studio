@@ -168,6 +168,14 @@ async function main() {
     assert.deepEqual(presence.lsofPaths("p42\nfcwd\nn/home/u\nf7\nn/x/presence/a.lock\n"), ["/home/u", "/x/presence/a.lock"]);
     assert.equal(await presence.antigravityOpenConversations(123, "win32"), null, "Windows has no way to read it: unknown");
     assert.deepEqual(await presence.antigravityOpenConversations(2 ** 31, "linux"), [], "a process gone since the listing holds nothing");
+    // A pane without a real conversation id never sleeps, whatever agy holds.
+    const idle = { open: async () => ["continue"], activity: () => ({ known: true, busy: null }) };
+    for (const id of ["continue", undefined, "-p hi"]) {
+      const verdict = await presence.antigravitySleepVerdict(1, "agy", id, idle);
+      assert.equal(verdict.ok, false, `id ${id} slept`);
+      assert.equal(verdict.reason, "conversation-unknown");
+      assert.equal(verdict.detail, "no conversation id");
+    }
 
     // The pane's one agy, holding one conversation, names it; anything else is unknown.
     A.pids.set("p2", 200);

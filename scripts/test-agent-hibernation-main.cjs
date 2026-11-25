@@ -301,36 +301,37 @@ async function main() {
   check("Sleep now puts an idle agy to sleep too", r.result.ok === true, r.result);
   const agyRefusals = [
     ["agy working on screen", (t) => Object.assign(t.state.evidence, { state: "working", chipState: "working" }), {}, "agent-busy"],
-    ["agy marking the conversation working", (t) => (t.state.activity = { known: true, busy: "conversation" }), {}, "agent-busy"],
-    ["a subagent agy marks working", (t) => (t.state.activity = { known: true, busy: "subagent" }), {}, "agent-busy"],
-    ["the placeholder id of agy --continue", null, { conversationId: "continue" }, "conversation-unknown"],
-    ["no conversation id", null, { conversationId: undefined }, "conversation-unknown"],
-    ["agy holding another conversation than the pane names", (t) => (t.state.open = ["conv-2"]), {}, "conversation-unknown"],
-    ["agy holding a second conversation (a subagent's, another one's)", (t) => (t.state.open = ["conv-1", "conv-sub"]), {}, "conversation-unknown"],
-    ["agy holding none", (t) => (t.state.open = []), {}, "conversation-unknown"],
-    ["agy's open files unreadable", (t) => (t.state.open = null), {}, "conversation-unknown"],
-    ["agy's conversation list unreadable", (t) => (t.state.activity = undefined), {}, "conversation-unknown"],
-    ["agy's conversation list without its busy flag", (t) => (t.state.activity = null), {}, "unknown-state"],
-    ["a conversation agy does not list", (t) => (t.state.activity = { known: false, busy: null }), {}, "conversation-unknown"],
+    ["agy marking the conversation working", (t) => (t.state.activity = { known: true, busy: "conversation" }), {}, "agent-busy", "agy marks it working"],
+    ["a subagent agy marks working", (t) => (t.state.activity = { known: true, busy: "subagent" }), {}, "agent-busy", "a subagent is working"],
+    ["the placeholder id of agy --continue", null, { conversationId: "continue" }, "conversation-unknown", "no conversation id"],
+    ["no conversation id", null, { conversationId: undefined }, "conversation-unknown", "no conversation id"],
+    ["agy holding another conversation than the pane names", (t) => (t.state.open = ["conv-2"]), {}, "conversation-unknown", "agy has another conversation open"],
+    ["agy holding a second conversation (a subagent's, another one's)", (t) => (t.state.open = ["conv-1", "conv-sub"]), {}, "conversation-unknown", "agy holds 2 conversations open"],
+    ["agy holding none", (t) => (t.state.open = []), {}, "conversation-unknown", "agy holds 0 conversations open"],
+    ["agy's open files unreadable", (t) => (t.state.open = null), {}, "conversation-unknown", "open conversation unreadable"],
+    ["agy's conversation list unreadable", (t) => (t.state.activity = undefined), {}, "conversation-unknown", "conversation list unreadable"],
+    ["agy's conversation list without its busy flag", (t) => (t.state.activity = null), {}, "unknown-state", "agy's conversation list has another shape"],
+    ["a conversation agy does not list", (t) => (t.state.activity = { known: false, busy: null }), {}, "conversation-unknown", "not in agy's conversation list"],
     ["text typed and not sent", (t) => (t.state.evidence.lastComposerEditAt = NOW - 80 * MIN), {}, "unsent-input"],
     ["a command agy started after boot", (t) => t.state.processes.push({ pid: 103, parentPid: 101, startMs: NOW - 20 * MIN, command: "npm run dev" }), {}, "other-processes"],
     ["a program beside agy in the pane", (t) => t.state.processes.push({ pid: 104, parentPid: 100, startMs: NOW - 20 * MIN, command: "vim notes" }), {}, "other-processes"],
-    ["agy in print mode", (t) => (t.state.processes[1].command = "agy -p summarize"), {}, "other-processes"],
-    ["agy with a remote connection", (t) => (t.state.processes[1].command = "agy --remote-control"), {}, "other-processes"],
-    ["no way to check agy at all", (t) => delete t.deps.antigravity, {}, "conversation-unknown"],
+    ["agy in print mode", (t) => (t.state.processes[1].command = "agy -p summarize"), {}, "other-processes", "agy is not an interactive session"],
+    ["agy with a remote connection", (t) => (t.state.processes[1].command = "agy --remote-control"), {}, "other-processes", "agy is not an interactive session"],
+    ["no way to check agy at all", (t) => delete t.deps.antigravity, {}, "conversation-unknown", "agy could not be checked"],
   ];
-  for (const [name, mutate, extra, reason] of agyRefusals) {
+  for (const [name, mutate, extra, reason, detail] of agyRefusals) {
     for (const manual of [false, true]) {
       r = await agyRun(mutate ?? undefined, { ...extra, ...(manual ? { manual: true } : {}) });
       check(
         `${manual ? "Sleep now: " : ""}${name} keeps agy awake (${reason})`,
-        r.result.ok === false && r.result.reason === reason && r.calls.stop.length === 0,
+        r.result.ok === false &&
+          r.result.reason === reason &&
+          (detail === undefined || r.result.detail === detail) &&
+          r.calls.stop.length === 0,
         r.result,
       );
     }
   }
-  r = await agyRun((t) => (t.state.activity = { known: true, busy: "subagent" }));
-  check("the refusal says a subagent works", r.result.detail === "a subagent is working", r.result);
   r = await agyRun(undefined, { conversationId: "continue" });
   check("a pane without a conversation id is refused before any process listing", r.calls.list === 0, r.calls);
   r = await agyRun((t) => {
