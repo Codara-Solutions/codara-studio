@@ -101,40 +101,57 @@ export function approvalAnswerItems(
 }
 
 /**
- * One line in plain words: what ticking the row removes and what stays. It
- * follows the dialog's choices: the merged-branches toggle and this row's
- * own "also delete on the remote" tick, so it never says a branch stays that
- * the removal would delete.
+ * One line in plain words: what ticking the row removes and what stays, in
+ * three parts: the folder (or git's record of it when the folder is already
+ * gone), the local branch, the remote branch. Each part follows what the
+ * removal will do with the dialog's choices (the merged-branches toggle and
+ * this row's own remote tick), and the remote is named as the checkbox that
+ * deletes it names it, so the line never says something stays that goes.
  */
 export function tickEffect(item: WorktreeCleanupApprovalItem, deleteMergedBranches: boolean, deleteRemoteBranch = false): string {
-  const folder = item.missing ? "folder (already gone)" : "folder";
-  const Folder = item.missing ? "Folder (already gone)" : "Folder";
   const commits = item.unmergedCommits;
-  if (!item.branch) {
-    return commits > 0
-      ? `${Folder} goes. Its ${plural(commits, "commit")} ${commits === 1 ? "stays" : "stay"} recoverable for 30 days.`
-      : `${Folder} goes.`;
+  const merged = item.merged && commits === 0;
+  const localGoes = Boolean(item.branch) && merged && deleteMergedBranches && item.branchDeletable;
+  const parts: string[] = [];
+  if (item.missing) {
+    parts.push(
+      !item.branch || !merged
+        ? "The folder is already gone; git's record of it goes."
+        : localGoes
+          ? "Merged. The folder is already gone; git's record of it and the local branch go."
+          : "Merged. The folder is already gone; git's record of it goes, the local branch stays.",
+    );
+  } else if (item.branch && merged) {
+    parts.push(localGoes ? "Merged: folder and local branch go." : "Merged: folder goes, the local branch stays.");
+  } else {
+    parts.push("Folder goes.");
   }
-  const pr = item.pullRequest && item.pullRequest.state !== "none" && item.pullRequest.state !== "unknown" ? item.pullRequest : null;
-  const where = pr ? "GitHub" : (item.remote.name ?? "the remote");
+  if (!item.branch) {
+    if (commits > 0) parts.push(`Its ${plural(commits, "commit")} ${commits === 1 ? "stays" : "stay"} recoverable for 30 days.`);
+    return parts.join(" ");
+  }
+  const remote = item.remote.name ?? "the remote";
   const remoteGoes = item.remote.offered && deleteRemoteBranch;
   const onRemote = item.onRemote === true || item.remote.offered;
-  if (item.merged && commits === 0) {
-    const local =
-      deleteMergedBranches && item.branchDeletable
-        ? `Merged: ${folder} and local branch go.`
-        : `Merged: ${folder} goes, the local branch stays.`;
-    if (!onRemote) return local;
-    if (remoteGoes) return `${local} The branch on ${where} goes too.`;
-    return item.remote.offered ? `${local} The branch on ${where} stays unless you tick it below.` : `${local} The branch on ${where} stays.`;
+  const pr = item.pullRequest && (item.pullRequest.state === "open" || item.pullRequest.state === "draft") ? item.pullRequest : null;
+  if (merged) {
+    if (onRemote) {
+      parts.push(
+        remoteGoes
+          ? `The branch on ${remote} goes too.`
+          : item.remote.offered
+            ? `The branch on ${remote} stays unless you tick it below.`
+            : `The branch on ${remote} stays.`,
+      );
+    }
+    return parts.join(" ");
   }
   const kept = commits > 0 ? `, with its ${plural(commits, "commit")} that ${commits === 1 ? "is" : "are"} not merged` : "";
-  if (remoteGoes) return `${Folder} goes. The local branch stays${kept}; the branch on ${where} goes.`;
-  if (onRemote) {
-    if (pr && (pr.state === "open" || pr.state === "draft")) return `${Folder} goes. Branch and pull request #${pr.number} stay on GitHub.`;
-    const unless = item.remote.offered ? " Tick below to delete it there." : "";
-    return `${Folder} goes. The branch stays, here and on ${where}.${unless}`;
-  }
-  if (item.onRemote === false) return `${Folder} goes. The branch stays on this computer only${kept}.`;
-  return `${Folder} goes. The branch stays${kept}.`;
+  if (remoteGoes) parts.push(`The local branch stays${kept}; the branch on ${remote} goes.`);
+  else if (onRemote) {
+    parts.push(`The branch stays, here and on ${remote}${pr ? `, with pull request #${pr.number}` : ""}.`);
+    if (item.remote.offered) parts.push("Tick below to delete it there.");
+  } else if (item.onRemote === false) parts.push(`The branch stays on this computer only${kept}.`);
+  else parts.push(`The branch stays${kept}.`);
+  return parts.join(" ");
 }

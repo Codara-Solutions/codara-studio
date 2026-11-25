@@ -446,7 +446,7 @@ async function main() {
         await expect(dialog.getByText("17 worktrees can be removed")).toBeVisible();
         await expect(dialog.getByRole("button", { name: /^18 cannot be removed now/ })).toHaveAttribute("aria-expanded", "false");
         assert.equal(await dialog.getByText("keep", { exact: true }).count(), 0, `${label}: a badge says keep`);
-        await expect(dialog.getByText("Folder goes. Branch and pull request #213 stay on GitHub.")).toBeVisible();
+        await expect(dialog.getByText("Folder goes. The branch stays, here and on origin, with pull request #213.")).toBeVisible();
         if (shots) await page.screenshot({ path: path.join(shots, `crowded-${theme.mode}-${viewport.width}.png`) });
         await dialog.getByRole("button", { name: "Tick all 17" }).click();
         await expect(dialog.getByRole("button", { name: "Remove 17 worktrees" })).toBeEnabled();

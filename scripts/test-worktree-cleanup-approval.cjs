@@ -156,14 +156,14 @@ async function main() {
   check("a row that can be ticked never says keep, and says what ticking does", () => {
     for (const entry of removable) assert.notEqual(m.APPROVAL_BADGE_LABELS[m.approvalBadge(entry)].toLowerCase(), "keep");
     assert.equal(m.approvalBadge(removable[6]), "check", "an open draft pull request reads Check first");
-    assert.equal(m.tickEffect(item("a"), true), "Merged: folder and local branch go. The branch on GitHub stays.");
-    assert.equal(m.tickEffect(item("a"), false), "Merged: folder goes, the local branch stays. The branch on GitHub stays.");
+    assert.equal(m.tickEffect(item("a"), true), "Merged: folder and local branch go. The branch on origin stays.");
+    assert.equal(m.tickEffect(item("a"), false), "Merged: folder goes, the local branch stays. The branch on origin stays.");
     assert.equal(m.tickEffect(item("a", { branchDeletable: false, onRemote: false }), true), "Merged: folder goes, the local branch stays.");
     assert.match(
       m.tickEffect(item("a", { remote: { offered: true, reason: "", name: "origin", suggested: false } }), true),
       /stays unless you tick it below/,
     );
-    assert.equal(m.tickEffect(removable[6], true), "Folder goes. Branch and pull request #40 stay on GitHub.");
+    assert.equal(m.tickEffect(removable[6], true), "Folder goes. The branch stays, here and on origin, with pull request #40.");
     assert.equal(
       m.tickEffect(item("a", { merged: false, unmergedCommits: 2, pullRequest: null, onRemote: true }), true),
       "Folder goes. The branch stays, here and on origin.",
@@ -178,19 +178,66 @@ async function main() {
     );
     assert.equal(m.tickEffect(item("a", { branch: null, merged: false, unmergedCommits: 1 }), true), "Folder goes. Its 1 commit stays recoverable for 30 days.");
     // A folder already gone still takes its merged branch with it.
-    assert.equal(m.tickEffect(item("a", { missing: true }), true), "Merged: folder (already gone) and local branch go. The branch on GitHub stays.");
-    assert.equal(m.tickEffect(item("a", { missing: true, branch: null, merged: false }), true), "Folder (already gone) goes.");
+    assert.equal(m.tickEffect(item("a", { missing: true }), true), "Merged. The folder is already gone; git's record of it and the local branch go. The branch on origin stays.");
+    assert.equal(m.tickEffect(item("a", { missing: true, branch: null, merged: false }), true), "The folder is already gone; git's record of it goes.");
     // The remote wording follows the row's own tick.
     const offeredRemote = { offered: true, reason: "Pull request #12 merged it.", name: "origin", suggested: false };
     assert.equal(
       m.tickEffect(item("a", { remote: offeredRemote }), true, true),
-      "Merged: folder and local branch go. The branch on GitHub goes too.",
+      "Merged: folder and local branch go. The branch on origin goes too.",
+    );
+    // The remote is named as the deletion checkbox names it, whatever hosts the pull request.
+    assert.equal(
+      m.tickEffect(item("a", { remote: { ...offeredRemote, name: "mirror" } }), true, true),
+      "Merged: folder and local branch go. The branch on mirror goes too.",
+    );
+    assert.equal(
+      m.tickEffect(item("a", { missing: true, remote: offeredRemote }), false, true),
+      "Merged. The folder is already gone; git's record of it goes, the local branch stays. The branch on origin goes too.",
     );
     // Commits added locally after the pull request merged: the local branch
     // stays, and the merged remote tip may still be deleted.
     const later = item("a", { merged: false, unmergedCommits: 2, remote: offeredRemote });
-    assert.equal(m.tickEffect(later, true, false), "Folder goes. The branch stays, here and on GitHub. Tick below to delete it there.");
-    assert.equal(m.tickEffect(later, true, true), "Folder goes. The local branch stays, with its 2 commits that are not merged; the branch on GitHub goes.");
+    assert.equal(m.tickEffect(later, true, false), "Folder goes. The branch stays, here and on origin. Tick below to delete it there.");
+    assert.equal(m.tickEffect(later, true, true), "Folder goes. The local branch stays, with its 2 commits that are not merged; the branch on origin goes.");
+  });
+
+  check("for every combination, the line says a branch goes exactly when the removal deletes it", () => {
+    let combos = 0;
+    for (const missing of [false, true])
+      for (const branch of ["feat/x", null])
+        for (const commits of [0, 2])
+          for (const merged of [true, false])
+            for (const branchDeletable of [true, false])
+              for (const onRemote of [true, false, null])
+                for (const offered of [true, false])
+                  for (const name of ["origin", "mirror", null])
+                    for (const deleteMerged of [true, false])
+                      for (const deleteRemote of [true, false]) {
+                        const row = item("x", {
+                          missing,
+                          branch,
+                          merged,
+                          unmergedCommits: commits,
+                          branchDeletable,
+                          onRemote,
+                          remote: { offered: offered && Boolean(branch), reason: "", name, suggested: false },
+                        });
+                        const text = m.tickEffect(row, deleteMerged, deleteRemote);
+                        const label = JSON.stringify({ missing, branch, commits, merged, branchDeletable, onRemote, offered, name, deleteMerged, deleteRemote, text });
+                        // What the removal does (remove.ts): the local branch goes only when merged with
+                        // nothing outside the base, deletable and asked for; the remote one only when offered and ticked.
+                        const localGoes = Boolean(branch) && merged && commits === 0 && branchDeletable && deleteMerged;
+                        const remoteGoes = Boolean(branch) && offered && deleteRemote;
+                        assert.equal(/local branch go/.test(text), localGoes, label);
+                        assert.equal(/local branch stays|branch stays/.test(text) && !localGoes, Boolean(branch) && !localGoes, label);
+                        assert.equal(text.includes(`on ${name ?? "the remote"} goes`), remoteGoes, label);
+                        if (remoteGoes) assert.ok(!text.includes(`on ${name ?? "the remote"} stays`), label);
+                        assert.equal(/git's record of it/.test(text), missing, label);
+                        assert.ok(!/GitHub/.test(text), `the remote is named as the checkbox names it: ${label}`);
+                        combos += 1;
+                      }
+    assert.ok(combos > 1000);
   });
 
   check("the dialog shows the agent's words escaped, the rows that can go, and folds the rest", () => {
@@ -219,7 +266,7 @@ async function main() {
     assert.deepEqual(order, ["safe-0", "safe-1", "safe-2", "check-0", "check-1", "check-2", "draft-pr"]);
     assert.equal((html.match(/type="checkbox"/g) ?? []).length, 1 + 7, "one per row that can go, and the merged-branches toggle");
     assert.ok(!/>keep</.test(html), "no badge says keep");
-    assert.match(html, /If ticked: <\/span>Folder goes\. Branch and pull request #40 stay on GitHub\./);
+    assert.match(html, /If ticked: <\/span>Folder goes\. The branch stays, here and on origin, with pull request #40\./);
     const quiet = m.renderToStaticMarkup(m.createElement(m.WorktreeCleanupApproval, { request: { ...request, reason: null }, onDone() {} }));
     assert.ok(!quiet.includes("worktree-cleanup-agent-reason"), "no line when the agent gave none");
   });
