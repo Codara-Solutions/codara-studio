@@ -53,6 +53,7 @@ import {
   usageUnknown,
   countsAsUse,
   finishedWork,
+  longLivedTargetStillHolds,
   heldByMaker,
   isAtOrUnder,
   usageOf,
@@ -319,6 +320,9 @@ async function changedWhileAside(
   const path = check.path;
   if ((await worktreeFingerprint(aside, undefined, fingerprintRegenerable(aside, ctx.regenerable))) !== before) {
     return "It changed while it was being removed, so it was put back.";
+  }
+  if (!(await longLivedTargetStillHolds(ctx.repo.root, check.merge, ctx.repo.base?.name ?? null))) {
+    return `${check.merge.target} on origin no longer holds the merge, so it was put back.`;
   }
   const realAside = await canonicalPath(aside);
   const usage = await usageContext(ctx.deps, [realAside]);

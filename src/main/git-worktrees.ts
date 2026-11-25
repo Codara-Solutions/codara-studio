@@ -710,11 +710,13 @@ export async function worktreeFingerprint(
       else await walk(code, join(relative, name), infos[index], regenerated && !checkout);
     }
   };
-  // What of a nested checkout's .git can hold work: HEAD, the index, its
-  // refs; not its objects, which only grow.
+  // All of a nested checkout's .git but its objects, which only grow and
+  // change nothing without a ref, a log or the index changing too.
   const walkGitState = async (code: string, relative: string, info: Awaited<ReturnType<typeof statOf>>): Promise<void> => {
     if (!info?.isDirectory()) return walk(code, relative, info);
-    for (const name of ["HEAD", "index", "packed-refs", "config", "refs"]) {
+    const names = (await fingerprintFs.readdir(join(worktreePath, relative))).sort();
+    for (const name of names) {
+      if (name === "objects") continue;
       await walk(code, join(relative, name), await statOf(join(worktreePath, relative, name)));
     }
   };
@@ -858,14 +860,21 @@ async function tryRemoveWorktreeOnce(
 
 // Untracked node_modules links (isDependencyLink): taken out with setup's
 // links, so a removal never reaches through one. None when git cannot say.
-async function untrackedDependencyLinks(worktreePath: string): Promise<string[]> {
+export async function untrackedDependencyLinks(worktreePath: string): Promise<string[]> {
   // Each file: a pkg/ holding only a link is listed as pkg/ otherwise.
   const out = await runGit(worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]).then(
     (result) => result.stdout,
     () => "",
   );
   const links: string[] = [];
-  for (const field of out.split("\0")) {
+  const fields = out.split("\0");
+  for (let index = 0; index < fields.length; index += 1) {
+    const field = fields[index];
+    // A rename or copy carries its source in the next field, which is no record.
+    if (field[0] === "R" || field[0] === "C") {
+      index += 1;
+      continue;
+    }
     if (field.startsWith("?? ") && (await isDependencyLink(worktreePath, field.slice(3)))) links.push(field.slice(3));
   }
   return links;
@@ -957,7 +966,11 @@ export async function removeCopyWorktree(
     }
     if (reason) {
       const back = await putBackAside(input.repoCwd, aside, original);
-      if (!back.ok) return { ok: false, changed: true, error: `${reason} ${back.error}` };
+      if (!back.ok) {
+        // It stays where it was moved: its links come back there.
+        await restoreWorktreeLinks(aside, releasedLinks).catch(() => undefined);
+        return { ok: false, changed: true, error: `${reason} ${back.error}` };
+      }
       return fail(reason, true);
     }
     work = { ...input, worktreePath: aside };

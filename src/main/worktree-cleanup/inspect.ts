@@ -240,19 +240,38 @@ function remoteHead(repo: RepoContext, branch: string): Promise<string | null> {
   repo.remoteHeads ??= new Map();
   let pending = repo.remoteHeads.get(branch);
   if (!pending) {
-    pending = runGit(repo.root, ["ls-remote", "--heads", "--end-of-options", "origin", `refs/heads/${branch}`], {
-      timeout: LS_REMOTE_TIMEOUT_MS,
-    }).then(
-      ({ stdout }) => {
-        const line = stdout.split(/\r?\n/).find((entry) => entry.endsWith(`\trefs/heads/${branch}`));
-        const oid = line?.split("\t")[0]?.trim().toLowerCase() ?? "";
-        return /^[0-9a-f]{40,64}$/.test(oid) ? oid : null;
-      },
-      () => null,
-    );
+    pending = liveRemoteHead(repo.root, branch);
     repo.remoteHeads.set(branch, pending);
   }
   return pending;
+}
+
+function liveRemoteHead(root: string, branch: string): Promise<string | null> {
+  return runGit(root, ["ls-remote", "--heads", "--end-of-options", "origin", `refs/heads/${branch}`], {
+    timeout: LS_REMOTE_TIMEOUT_MS,
+  }).then(
+    ({ stdout }) => {
+      const line = stdout.split(/\r?\n/).find((entry) => entry.endsWith(`\trefs/heads/${branch}`));
+      const oid = line?.split("\t")[0]?.trim().toLowerCase() ?? "";
+      return /^[0-9a-f]{40,64}$/.test(oid) ? oid : null;
+    },
+    () => null,
+  );
+}
+
+/**
+ * For a merge proved in a long-lived branch other than the default
+ * (staging), which some repositories reset: whether origin still holds the
+ * commit the proof was made against. Asked again right before deletion; no
+ * answer is a no. Any other proof is unchanged by this.
+ */
+export async function longLivedTargetStillHolds(root: string, merge: MergeFacts, defaultBranch: string | null): Promise<boolean> {
+  if (merge.state !== "merged" || !merge.target?.startsWith("origin/")) return true;
+  const name = merge.target.slice("origin/".length);
+  if (!PROTECTED_BRANCHES.has(name) || name === (defaultBranch ? shortBranch(defaultBranch) : null)) return true;
+  const live = await liveRemoteHead(root, name);
+  if (!live || !merge.targetCommit || !(await revParse(root, `${live}^{commit}`))) return false;
+  return isAncestor(root, merge.targetCommit, live);
 }
 
 interface WorktreeListing {
@@ -734,6 +753,10 @@ export async function mergeFacts(
   // What the target holds for the proofs below that read its content.
   const judged = longLivedTarget ? await liveCommit(targetShort) : target.commit;
   if (judged && (longLivedTarget || ahead === 0) && (await isAncestor(repo.root, head, judged))) {
+    // Against what origin holds, which the removal asks again.
+    if (longLivedTarget && judged !== target.commit) {
+      return { state: "merged", proof: "ancestor", target: target.name, targetCommit: judged, ...(await aheadBehind(repo.root, judged, head)) };
+    }
     return { state: "merged", proof: "ancestor", ...facts };
   }
   // A base that is not the default branch (a stacked pull request's branch,
@@ -829,6 +852,8 @@ export function parseStatus(output: string): StatusCounts {
   return { tracked, untracked, raw: output };
 }
 
+const COLLAPSED_LINK_FOLDERS = 20;
+
 // An untracked node_modules link (isDependencyLink) is no one's work: the
 // removal takes the link out first, never what it points at. It is left out
 // of the counts and of the raw status a confirmation is tied to.
@@ -837,6 +862,21 @@ export async function readStatus(path: string, untracked: "all" | "normal"): Pro
   const status = parseStatus(stdout);
   const links = new Set<string>();
   for (const entry of status.untracked) if (await isDependencyLink(path, entry)) links.add(entry);
+  // A new folder git lists as one entry (pkg/) that holds only such links,
+  // as each file under it shows: a few folders, so a big one costs no walk.
+  const folders = untracked === "normal" ? status.untracked.filter((entry) => entry.endsWith("/")) : [];
+  if (folders.length <= COLLAPSED_LINK_FOLDERS) {
+    for (const folder of folders) {
+      const inside = await runGit(path, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", folder]).then(
+        (result) => parseStatus(result.stdout),
+        () => null,
+      );
+      if (!inside || inside.tracked.length || !inside.untracked.length || inside.untracked.length > COLLAPSED_LINK_FOLDERS) continue;
+      let onlyLinks = true;
+      for (const entry of inside.untracked) if (!(await isDependencyLink(path, entry))) onlyLinks = false;
+      if (onlyLinks) links.add(folder);
+    }
+  }
   if (!links.size) return status;
   const fields = stdout.split("\0");
   const kept: string[] = [];

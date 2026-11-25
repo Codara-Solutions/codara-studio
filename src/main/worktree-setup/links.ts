@@ -10,7 +10,7 @@
 // and their tests bundle them without the rest of the setup code.
 
 import { promises as fsp } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 
 export const SETUP_DIR_NAME = "codara-setup";
 export const SETUP_MANIFEST_FILE = "manifest.json";
@@ -155,7 +155,26 @@ export async function removeLinkEntry(absolute: string): Promise<boolean> {
  */
 export async function isDependencyLink(worktreePath: string, relative: string): Promise<boolean> {
   if (!safeRelative(relative) || basename(relative) !== "node_modules") return false;
-  return (await linkTarget(join(worktreePath, ...relative.split("/")))) !== null;
+  const absolute = join(worktreePath, ...relative.split("/"));
+  // Its folder must be the worktree's own: through a linked parent, the
+  // link taken out would be somewhere else.
+  const [root, parent] = await Promise.all([
+    fsp.realpath(worktreePath).catch(() => null),
+    fsp.realpath(dirname(absolute)).catch(() => null),
+  ]);
+  if (!root || !parent || (parent !== root && !parent.startsWith(root.endsWith(sep) ? root : root + sep))) return false;
+  return (await linkTarget(absolute)) !== null;
+}
+
+// Whether something may still be at the path: a link, or an entry that
+// cannot be read. Only a missing entry, or a real folder or file, says no.
+async function linkMayRemain(absolute: string): Promise<boolean> {
+  try {
+    return (await fsp.lstat(absolute)).isSymbolicLink();
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return code !== "ENOENT" && code !== "ENOTDIR";
+  }
 }
 
 /**
@@ -216,7 +235,7 @@ export async function prepareWorktreeRemoval(worktreePath: string, dependencyLin
   const paths = [...(manifest?.links ?? []).map((link) => link.path), ...dependencyLinks];
   for (const path of paths) {
     if (!safeRelative(path)) continue;
-    if ((await linkTarget(join(worktreePath, ...path.split("/")))) !== null) {
+    if (await linkMayRemain(join(worktreePath, ...path.split("/")))) {
       await restoreWorktreeLinks(worktreePath, released);
       throw new Error(
         `Could not take out the linked folder ${path} before removing the worktree. Close what uses it, then try again.`,
@@ -233,9 +252,11 @@ export async function restoreWorktreeLinks(worktreePath: string, links: readonly
     const absolute = join(worktreePath, ...link.path.split("/"));
     if (await fsp.lstat(absolute).catch(() => null)) continue;
     try {
-      if (link.exact !== undefined && process.platform !== "win32") {
-        // As it read, dangling or relative alike.
-        await fsp.symlink(link.exact, absolute);
+      if (link.exact !== undefined) {
+        // As it read, dangling or relative alike; Windows makes a junction
+        // only to a full path, one that may be gone as well.
+        if (process.platform === "win32") await fsp.symlink(resolve(dirname(absolute), withoutLongPathPrefix(link.exact)), absolute, "junction");
+        else await fsp.symlink(link.exact, absolute);
         continue;
       }
       const target = await fsp.stat(link.target).catch(() => null);

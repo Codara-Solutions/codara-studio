@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, promises as fsp, readdirSync } from "node:fs";
 import { readlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import { devNull } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { isRemotePath } from "@shared/remote";
 import {
@@ -785,10 +786,52 @@ const PACKAGE_MANIFESTS = [
 // terraform init writes, holding only what init writes there. Only beside
 // that file and with nothing else in it, so a hand-made folder of that name,
 // or a note left in one, is asked about.
-const TOOL_OUTPUT_DIRS: Readonly<Record<string, { beside: readonly string[]; holds: readonly string[] }>> = {
+interface ToolOutputDir {
+  beside: readonly string[];
+  holds: readonly string[];
+  /** The folder's contents below its top level are the tool's too (given its absolute path). */
+  deep(absolute: string): boolean;
+}
+
+const TOOL_OUTPUT_WALK_LIMIT = 5_000;
+
+// What terraform init writes below .terraform/: provider binaries
+// (terraform-provider-*, with lock.json in the old plugins/ layout) or links
+// into its plugin cache under providers/ and plugins/, and under modules/
+// its modules.json beside one folder per module (a clone is checked on its
+// own: isPristineModuleDownload). Anything else, or a walk cut short, is
+// someone's.
+function terraformOutputOnly(absolute: string): boolean {
+  let budget = TOOL_OUTPUT_WALK_LIMIT;
+  const entries = (dir: string) => {
+    try {
+      return readdirSync(dir, { withFileTypes: true });
+    } catch (err) {
+      return (err as NodeJS.ErrnoException)?.code === "ENOENT" ? [] : null;
+    }
+  };
+  for (const sub of ["providers", "plugins"]) {
+    const stack = [join(absolute, sub)];
+    while (stack.length) {
+      const dir = stack.pop()!;
+      const children = entries(dir);
+      if (!children) return false;
+      for (const child of children) {
+        if ((budget -= 1) < 0) return false;
+        if (child.isDirectory()) stack.push(join(dir, child.name));
+        else if (!child.isSymbolicLink() && !/^terraform-provider-/.test(child.name) && child.name !== "lock.json") return false;
+      }
+    }
+  }
+  const modules = entries(join(absolute, "modules"));
+  return !!modules && modules.every((child) => child.isDirectory() || child.name === "modules.json");
+}
+
+const TOOL_OUTPUT_DIRS: Readonly<Record<string, ToolOutputDir>> = {
   ".terraform": {
     beside: [".terraform.lock.hcl"],
     holds: ["providers", "modules", "plugins", "plugin_path", "terraform.tfstate", "environment"],
+    deep: terraformOutputOnly,
   },
 };
 
@@ -798,7 +841,7 @@ const TOOL_OUTPUT_DIRS: Readonly<Record<string, { beside: readonly string[]; hol
  * nothing but the named entries; without it no tool's folder is regenerable.
  */
 export type PackageRootTester = ((dir: string, manifests?: readonly string[]) => boolean) & {
-  holdsOnly?(dir: string, names: readonly string[]): boolean;
+  holdsOnly?(dir: string, names: readonly string[], deep?: (absolute: string) => boolean): boolean;
 };
 
 export function packageRootTester(root: string): PackageRootTester {
@@ -812,12 +855,12 @@ export function packageRootTester(root: string): PackageRootTester {
     }
     return found;
   };
-  tester.holdsOnly = (dir, names) => {
-    const key = `holds\0${dir}\0${names.join("\0")}`;
+  tester.holdsOnly = (dir, names, deep) => {
+    const key = `holds\0${dir}\0${names.join("\0")}\0${deep ? "deep" : ""}`;
     let found = known.get(key);
     if (found === undefined) {
       try {
-        found = readdirSync(join(root, dir)).every((name) => names.includes(name));
+        found = readdirSync(join(root, dir)).every((name) => names.includes(name)) && (!deep || deep(join(root, dir)));
       } catch {
         found = false;
       }
@@ -847,7 +890,7 @@ export function isRegenerableIgnored(
   if (!isSecretFile(last) && isRegenerableCachePath(segments, isDir)) return true;
   const parent = segments.slice(0, -1).join("/");
   const tool = Object.hasOwn(TOOL_OUTPUT_DIRS, last) ? TOOL_OUTPUT_DIRS[last] : null;
-  if (isDir && tool && isPackageRoot?.(parent, tool.beside) === true && isPackageRoot.holdsOnly?.(segments.join("/"), tool.holds) === true) return true;
+  if (isDir && tool && isPackageRoot?.(parent, tool.beside) === true && isPackageRoot.holdsOnly?.(segments.join("/"), tool.holds, tool.deep) === true) return true;
   const atPackageRoot = parent === "" || isPackageRoot?.(parent) === true;
   const patterns = !isDir && isSecretFile(last) ? extra : [...REGENERABLE_IGNORED_PATTERNS, ...extra];
   for (const pattern of patterns) {
@@ -972,7 +1015,23 @@ async function isPristineModuleDownload(
   const dotGit = join(clone, ".git");
   if (!(await fsp.lstat(dotGit).catch(() => null))?.isDirectory()) return false;
   if (!(await plainCloneConfig(dotGit))) return false;
-  const git = (args: string[]) => runGit(clone, ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", ...args]);
+  // Its own config only: no global, system or environment config, where a
+  // filter its tracked .gitattributes names could be defined.
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: devNull,
+    GIT_CONFIG_SYSTEM: devNull,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_ATTR_NOSYSTEM: "1",
+  };
+  for (const name of Object.keys(env)) {
+    if (name === "GIT_CONFIG_PARAMETERS" || name === "GIT_CONFIG_COUNT" || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(name)) delete env[name];
+  }
+  delete env.GIT_DIR;
+  delete env.GIT_WORK_TREE;
+  delete env.GIT_INDEX_FILE;
+  const git = (args: string[]) =>
+    runGit(clone, ["-c", "core.fsmonitor=false", "-c", `core.hooksPath=${devNull}`, "-c", `core.attributesFile=${devNull}`, ...args], { env });
   try {
     // git walks up past a .git folder it cannot use; the worktree's own
     // status must never answer for the clone.
@@ -985,7 +1044,8 @@ async function isPristineModuleDownload(
       const tag = record[0];
       if (tag && (tag === "S" || tag !== tag.toUpperCase())) return false;
     }
-    const own = await git(["rev-list", "--count", "--all", "--not", "--remotes"]);
+    // Its reflogs too: a commit made there and reset away is still someone's.
+    const own = await git(["rev-list", "--count", "--all", "--reflog", "--not", "--remotes"]);
     return own.stdout.trim() === "0";
   } catch {
     return false;
