@@ -25,7 +25,7 @@ import { WorkspaceAgentsLine } from "./workspace-status/WorkspaceAgentsLine";
 import { useAgentLinesOf } from "./workspace-status/agentLinesStore";
 import { AgentSleepMenuItem } from "./rail/AgentSleepMenuItem";
 import { Chevron, ExternalWorktreeRow, WorkspaceChildren, WorktreeAgentLine } from "./rail/WorkspaceChildren";
-import { CleanUpHoldsConfirm, RailCleanUpNotices, useRailCleanUp, type RailCleanUpEntry } from "./rail/RailCleanUp";
+import { CleanUpConfirm, RailCleanUpNotices, useRailCleanUp, type RailCleanUpAnswer, type RailCleanUpEntry } from "./rail/RailCleanUp";
 import { setRailFold, useRailFold } from "./rail/railFolds";
 import WorkspaceStatusPicker from "./workspace-status/WorkspaceStatusPicker";
 import { setWorkspaceStatus, useUserWorkspaceStatus } from "./workspace-status/workspaceStatusStore";
@@ -180,9 +180,9 @@ interface RailProps {
   externalWorktrees?: readonly WorktreeRailExternal[];
   onOpenExternalWorktree?: (entry: WorktreeRailExternal) => void;
   // Clean up a merged worktree, or remove a workspace whose folder is gone.
-  // confirmIgnored carries the fingerprint of a "confirm" answer the user
+  // answer carries the fingerprints of a "confirm" answer the user
   // accepted; null means there was nothing to report.
-  onCleanUpWorkspace?: (id: string, confirmIgnored?: string) => Promise<WorktreeRailCleanupResult | null>;
+  onCleanUpWorkspace?: (id: string, answer?: RailCleanUpAnswer) => Promise<WorktreeRailCleanupResult | null>;
   // The first section's share when exactly two sections are stacked here.
   split: number;
   collapsed: Record<PanelSectionKey, boolean>;
@@ -844,7 +844,7 @@ function WorkspaceRail(props: RailProps) {
     branch: props.branchByWorkspaceId?.[w.id] ?? null,
     missing: missingWorkspaceIds.has(w.id) || props.worktreeByWorkspaceId?.[w.id]?.missing === true,
     worktree: props.worktreeByWorkspaceId?.[w.id] ?? null,
-    onCleanUp: props.onCleanUpWorkspace ? (confirmIgnored) => props.onCleanUpWorkspace!(w.id, confirmIgnored) : undefined,
+    onCleanUp: props.onCleanUpWorkspace ? (answer) => props.onCleanUpWorkspace!(w.id, answer) : undefined,
     folderColorManaged: groupId !== null,
     menuBoundaryRef: wsScrollRef,
     onActivate: () => props.onActivate(w.id),
@@ -2323,7 +2323,7 @@ function WorkspaceRow({
         onDismiss={rowCleanUp.dismiss}
       />
       {rowCleanUp.holding.length > 0 && (
-        <CleanUpHoldsConfirm
+        <CleanUpConfirm
           holding={rowCleanUp.holding}
           testId="workspace-clean-up-confirm"
           onCancel={rowCleanUp.cancelHolding}

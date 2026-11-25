@@ -3,6 +3,7 @@ import type { GitHubMergeResult, GitHubPullRequestSummary } from "@shared/github
 import type { PullRequestWatchEntry } from "@shared/pull-request-watch";
 import { LANE_STEP_LABELS, type LaneFile, type LaneStep, type SourceLane, type SourceLanes } from "@shared/source-lanes";
 import type { WorktreeRailCleanupResult, WorktreeRailExternal } from "@shared/worktree-cleanup";
+import type { RailCleanUpAnswer } from "../../rail/RailCleanUp";
 import { PullRequestMark } from "../../../git/PullRequestMark";
 import { usePullRequestWatches } from "../../../git/pullRequestWatchStore";
 import { unwrapIpcError } from "../../../lib/ipc-error";
@@ -31,7 +32,7 @@ const LANE_FILES_SHOWN = 8;
 export interface LaneActions {
   onOpenWorkspace: (workspaceId: string) => void;
   onOpenExternalWorktree?: (entry: WorktreeRailExternal) => void;
-  onCleanUpWorkspace?: (id: string, confirmIgnored?: string) => Promise<WorktreeRailCleanupResult | null>;
+  onCleanUpWorkspace?: (id: string, answer?: RailCleanUpAnswer) => Promise<WorktreeRailCleanupResult | null>;
   externalWorktrees?: readonly WorktreeRailExternal[];
   /** A lane's merge changed what the panel shows. */
   onChanged: () => void;
@@ -290,7 +291,7 @@ export default function SourceLanesList({
               {
                 id: lane.workspaceId,
                 name: lane.branch ?? lane.path,
-                cleanUp: (confirmIgnored?: string) => actions.onCleanUpWorkspace!(lane.workspaceId!, confirmIgnored),
+                cleanUp: (answer?: RailCleanUpAnswer) => actions.onCleanUpWorkspace!(lane.workspaceId!, answer),
               },
             ]
           : [],

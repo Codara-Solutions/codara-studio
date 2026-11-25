@@ -15,6 +15,7 @@ import type {
 } from "@shared/types";
 import type { GitHubWorkQueueItem } from "@shared/github";
 import type { WorktreeRailCleanupResult, WorktreeRailExternal } from "@shared/worktree-cleanup";
+import type { RailCleanUpAnswer } from "../rail/RailCleanUp";
 import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
 import { ReviewNotesIcon } from "../review/ReviewNotesIcon";
 import ChangeList from "./ChangeList";
@@ -66,7 +67,7 @@ interface Props extends SourceLanesContext {
   activeDiffTarget: { path: string; staged: boolean } | null;
   onActivateWorkspace: (id: string) => void;
   onOpenExternalWorktree?: (entry: WorktreeRailExternal) => void;
-  onCleanUpWorkspace?: (id: string, confirmIgnored?: string) => Promise<WorktreeRailCleanupResult | null>;
+  onCleanUpWorkspace?: (id: string, answer?: RailCleanUpAnswer) => Promise<WorktreeRailCleanupResult | null>;
   /** Opens a file in the editor by its absolute path. */
   onOpenFile?: (absolutePath: string) => void;
 }
