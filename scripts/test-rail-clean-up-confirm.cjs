@@ -90,6 +90,12 @@ async function main() {
                         const processes = [{ pid: 4242, program: "node server.js", runningMs: 3 * 3600000, startedBy: "started by an agent that is still open: the tab “dev”" }];
                         return { status: "confirm", processes, stopFingerprint: "sp-1", branchDeleted: false };
                       }
+                      // "late" reads READY at the check, then gains a program
+                      // before the click: main asks about it (no fingerprint came back).
+                      if (name === "late" && !answer.preview && window.lateGained && answer.confirmStop !== "sp-late") {
+                        const processes = [{ pid: 5151, program: "vite", runningMs: 1000 }];
+                        return { status: "confirm", code: "CONFIRM_STOP", processes, stopFingerprint: "sp-late", branchDeleted: false };
+                      }
                       if (answer.preview) return { status: "confirm", code: "READY", branchDeleted: false };
                       window.cleaned.push(name);
                       // A removal that waits for the test to let it finish.
@@ -316,6 +322,30 @@ async function main() {
     });
     await expect(cleanUp).toHaveText("Clean up");
     await expect(rows).toHaveText(["b", "c", "d"]);
+
+    // A row READY at the check that gained a program before the click is
+    // asked about again, named as changed, and is not removed meanwhile.
+    await page.evaluate(() => {
+      window.setMergedNames(["late", "plain"]);
+      window.cleaned = [];
+      window.answers = [];
+      window.lateGained = false;
+    });
+    await cleanUp.click();
+    await expect(confirm).toContainText("Clean up 2 merged worktrees?");
+    await expect(confirm.locator("li")).toHaveText(["late", "plain"]);
+    await page.evaluate(() => (window.lateGained = true));
+    await confirm.getByRole("button", { name: "Clean up" }).click();
+    await expect(confirm).toContainText("late still runs vite");
+    await expect(confirm).toContainText("It changed since you were asked. Check the list again.");
+    assert.deepEqual(await page.evaluate(() => window.cleaned), ["plain"], "late was not removed on the first yes");
+    await confirm.getByRole("button", { name: "Stop and clean up" }).click();
+    await expect(confirm).toHaveCount(0);
+    await expect.poll(() => page.evaluate(() => window.cleaned)).toEqual(["plain", "late"]);
+    assert.deepEqual(
+      await page.evaluate(() => window.answers.filter(([name]) => name === "late").map(([, answer]) => answer)),
+      [{ preview: true }, {}, { confirmStop: "sp-late" }],
+    );
     assert.deepEqual(errors, []);
     console.log("PASS the merged fold's Clean up confirm");
   } finally {

@@ -14,10 +14,14 @@ import { psTimeEnvironment, readProcFile } from "../owned-process-tree";
 // inside the worktree, all read again in the same tick as the signal
 // (linuxSameNow, macSameNow, with the window they leave). Anything that
 // cannot be read is unknown, never "gone": nothing is signalled for it and
-// the worktree stays. Codara's own processes, the shells of terminal panes
-// and what the user runs in a pane are never stopped: they are named, and
-// the worktree stays. Only a click stops anything; the unattended mode
-// never does.
+// the worktree stays. Never stopped, only named (and the worktree stays):
+// Codara's own processes; a pane's shell and anything below a pane that no
+// agent started; and, outside the panes, anything with a terminal attached
+// or that is a shell, which the user runs in a terminal of their own. Below
+// a pane, an agent's descendants may be stopped even with the pane's
+// terminal attached: that terminal is Codara's. The terminal is read again
+// at the signal too. Only a click stops anything; the unattended mode never
+// does.
 
 // Real POSIX paths as the system gives them, compared exactly: a backslash
 // is part of a name here, and a case-sensitive volume has "a" and "A".
@@ -41,6 +45,8 @@ export interface ProcessFacts {
   startedAtMs: number | null;
   /** Null when it cannot be read. */
   cwd: string | null;
+  /** Its controlling terminal as the system names it; null when it has none. */
+  tty: string | null;
   command: string;
   /** Exited, waiting for its parent to collect it. */
   zombie: boolean;
@@ -55,19 +61,29 @@ export interface LeftoverSystem {
   /** Every process's pid and parent; null when they cannot be listed. */
   table(): Promise<ReadonlyArray<{ pid: number; parentPid: number }> | null>;
   /**
-   * Signals `pid` only if, read again in the same tick as the signal with
-   * nothing awaited in between, it still has that start and raw arguments
-   * and works inside `real`; false when it was not sent.
+   * Signals each target only if, read again in the same tick as the signal
+   * with nothing awaited in between, it still has that start, raw arguments
+   * and terminal and works inside `real`. Per pid: true when sent, otherwise
+   * why not. One read covers all targets where the system allows it.
    */
-  signal(pid: number, signal: "SIGTERM" | "SIGKILL", expect: { start: string; commandKey: string; real: string }): boolean;
+  signal(targets: readonly SignalTarget[], signal: "SIGTERM" | "SIGKILL", real: string): Map<number, true | string>;
   wait(ms: number): Promise<void>;
   now(): number;
   /** How long SIGTERM gets before SIGKILL. */
   graceMs?: number;
 }
 
+export interface SignalTarget {
+  pid: number;
+  start: string;
+  commandKey: string;
+  tty: string | null;
+}
+
 export interface Leftover extends WorktreeLeftoverProcess {
   start: string;
+  /** Its terminal when it was named: one attached since is not what was confirmed. */
+  tty: string | null;
   /** Its argument list, hashed: with the pid and start, what makes it the same process. */
   commandKey: string;
   /** Why it is not stopped; the worktree then stays. */
@@ -78,6 +94,8 @@ const SHELLS = new Set(["sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh
 const AGENTS = new Set(["claude", "codex", "cora", "pi", "gemini", "grok", "agy", "aider", "opencode", "cursor-agent", "amp"]);
 const RUNNERS = new Set(["node", "nodejs", "python", "python3", "deno", "bun", "ruby", "php", "perl", "tsx", "ts-node", "uvicorn"]);
 const PACKAGE_RUNNERS = new Set(["npm", "pnpm", "yarn", "bun", "npx"]);
+/** Why a shell, or anything with a terminal, outside Codara's panes is left alone. */
+export const ELSEWHERE = "it belongs to a terminal outside Codara. Exit it there or cd out of the folder, then Clean up again";
 const WORD = /^[\w@+.:-]{1,40}$/;
 
 function nameOf(word: string | undefined): string {
@@ -143,7 +161,7 @@ export async function describeLeftovers(
     try {
       facts = await system.facts(pid);
     } catch {
-      out.push({ pid, start: "", commandKey: "", program: "a program", blocked: "it could not be read" });
+      out.push({ pid, start: "", commandKey: "", tty: null, program: "a program", blocked: "it could not be read" });
       continue;
     }
     if (!facts || facts.zombie) continue;
@@ -164,24 +182,26 @@ export async function describeLeftovers(
     else if (app.has(pid) || (appAt >= 0 && (sessionAt < 0 || appAt < sessionAt))) blocked = "it is part of Codara";
     if (!blocked && session !== undefined) {
       const chain = await Promise.all(ancestors.slice(0, sessionAt + 1).map((up) => system.facts(up).catch(() => null)));
-      const parent = chain[0];
-      // What the user typed into a pane's shell is theirs to stop there.
-      if (facts.parentPid === session && parent && SHELLS.has(nameOf(parent.command.split(/\s+/)[0]))) {
-        blocked = `it runs in ${tabOf(session)}. Stop it there first`;
-      } else if (chain.some((entry) => entry && isAgentCommand(entry.command))) {
+      // Below a pane, at any depth, it is the user's unless an agent started
+      // it: an ancestor that cannot be read is not taken for an agent.
+      if (chain.some((entry) => entry && isAgentCommand(entry.command))) {
         startedBy = `started by an agent that is still open: ${tabOf(session)}`;
       } else {
-        startedBy = `started from ${tabOf(session)}, still open`;
+        blocked = `it runs in ${tabOf(session)}. Stop it there first`;
       }
+    } else if (!blocked && (facts.tty !== null || SHELLS.has(nameOf(facts.argv[0])))) {
+      // Outside Codara's panes: a terminal of the user's own works in it.
+      blocked = ELSEWHERE;
     }
     if (!blocked && (facts.cwd === null || !isAtOrUnder(facts.cwd, real))) {
-      blocked = facts.cwd === null ? "its folder cannot be read" : "it only has a file open in it. Close that file first";
+      blocked = facts.cwd === null ? "its folder cannot be read. Stop it yourself, then Clean up again" : "it only has a file open in it. Close that file first";
     }
     const runningMs = facts.startedAtMs === null ? undefined : Math.max(0, system.now() - facts.startedAtMs);
     out.push({
       pid,
       start: facts.start,
       commandKey: facts.argvKey,
+      tty: facts.tty,
       program: programOf(facts.argv, facts.argvExact),
       ...(runningMs !== undefined ? { runningMs } : {}),
       ...(startedBy ? { startedBy } : {}),
@@ -208,6 +228,9 @@ export function shownLeftover(entry: Leftover): WorktreeLeftoverProcess {
 }
 
 const POLL_MS = 100;
+const ATTACHED = "a terminal was attached to it since you said yes, so it was not stopped";
+const SLOW = "the system did not answer in time, so it was not stopped";
+const CHANGED = "it changed since you said yes, so it was not stopped";
 const KILL_WAIT_MS = 2_000;
 
 type Seen = "gone" | "unknown" | ProcessFacts;
@@ -237,14 +260,34 @@ export async function stopLeftovers(
     return facts;
   };
   const inside = (seen: Seen) => typeof seen === "object" && seen.cwd !== null && isAtOrUnder(seen.cwd, real);
+  // Why the last signal meant for each was not sent, when it was not.
+  const refused = new Map<number, string>();
   const send = async (targets: readonly Leftover[], signal: "SIGTERM" | "SIGKILL") => {
+    const due: Leftover[] = [];
     for (const entry of targets) {
-      if (!inside(await look(entry))) continue;
-      try {
-        system.signal(entry.pid, signal, { start: entry.start, commandKey: entry.commandKey, real });
-      } catch {
-        /* Gone between the check and the signal. */
+      const seen = await look(entry);
+      if (!inside(seen)) continue;
+      if ((seen as ProcessFacts).tty !== entry.tty) {
+        refused.set(entry.pid, ATTACHED);
+        continue;
       }
+      due.push(entry);
+    }
+    if (!due.length) return;
+    let sent: Map<number, true | string>;
+    try {
+      sent = system.signal(
+        due.map(({ pid, start, commandKey, tty }) => ({ pid, start, commandKey, tty })),
+        signal,
+        real,
+      );
+    } catch {
+      sent = new Map(due.map((entry) => [entry.pid, "whether it could be stopped could not be read"]));
+    }
+    for (const entry of due) {
+      const result = sent.get(entry.pid) ?? "it was not stopped";
+      if (result === true) refused.delete(entry.pid);
+      else refused.set(entry.pid, result);
     }
   };
   const waitFor = async (targets: readonly Leftover[], ms: number) => {
@@ -271,7 +314,7 @@ export async function stopLeftovers(
   for (const entry of left) {
     const seen = await look(entry);
     if (seen === "unknown") failed.push({ entry, why: "whether it stopped could not be read" });
-    else if (inside(seen)) failed.push({ entry, why: "it did not stop, even when forced" });
+    else if (inside(seen)) failed.push({ entry, why: refused.get(entry.pid) ?? "it did not stop, even when forced" });
   }
   return failed;
 }
@@ -300,14 +343,16 @@ async function linuxBoot(): Promise<number | null> {
   return match ? Number(match[1]) : null;
 }
 
-function linuxStat(text: string): { state: string; parentPid: number; ticks: string; name: string } | null {
+// After the name: state, ppid, pgrp, session, tty_nr (field 7 of the whole
+// line), ..., starttime (field 22). A tty_nr of 0 is no controlling terminal.
+function linuxStat(text: string): { state: string; parentPid: number; tty: string | null; ticks: string; name: string } | null {
   const open = text.indexOf("(");
   const close = text.lastIndexOf(")");
   if (open < 0 || close < open) return null;
   const fields = text.slice(close + 2).split(" ");
   const parentPid = Number(fields[1]);
-  if (!Number.isSafeInteger(parentPid) || !/^\d+$/.test(fields[19] ?? "")) return null;
-  return { state: fields[0], parentPid, ticks: fields[19], name: text.slice(open + 1, close) };
+  if (!Number.isSafeInteger(parentPid) || !/^\d+$/.test(fields[19] ?? "") || !/^-?\d+$/.test(fields[4] ?? "")) return null;
+  return { state: fields[0], parentPid, tty: fields[4] === "0" ? null : fields[4], ticks: fields[19], name: text.slice(open + 1, close) };
 }
 
 // Null when it is gone; throws when it cannot be read.
@@ -347,6 +392,7 @@ async function linuxFacts(pid: number): Promise<ProcessFacts | null> {
     // Only when the link's text names that very folder (device and inode):
     // a folder deleted since, whatever its text says, is unknown.
     cwd: placed && "cwd" in placed ? placed.cwd : null,
+    tty: after.tty,
     command: words.length ? words.join(" ") : `[${after.name}]`,
     argv: words.length ? words : [`[${after.name}]`],
     argvExact: true,
@@ -373,17 +419,23 @@ async function linuxTable(): Promise<Array<{ pid: number; parentPid: number }> |
   return rows.length ? rows : null;
 }
 
-const PS_FACTS = /^\s*(\d+)\s+(\S+)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s?(.*)$/;
+// Two leading columns (a number, then a word), a terminal, lstart, args.
+const PS_FACTS = /^\s*(\d+)\s+(\S+)\s+(\S+)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s?(.*)$/;
+
+/** ps's terminal column: "??" (macOS) or "?" when there is none. */
+function psTty(word: string): string | null {
+  return word === "??" || word === "?" || word === "-" ? null : word;
+}
 
 // Null when it is gone (ps lists nothing and says so); throws otherwise.
-async function macPs(pid: number): Promise<{ parentPid: number; state: string; start: string; command: string } | null> {
-  const out = await run("ps", ["-o", "ppid=,stat=,lstart=,args=", "-p", String(pid)]);
+async function macPs(pid: number): Promise<{ parentPid: number; state: string; tty: string | null; start: string; command: string } | null> {
+  const out = await run("ps", ["-o", "ppid=,stat=,tty=,lstart=,args=", "-p", String(pid)]);
   const match = PS_FACTS.exec(out.stdout.split(/\r?\n/)[0] ?? "");
   if (!match) {
     if (out.code === 1 && !out.stdout.trim()) return null;
     throw new Error(`ps could not read process ${pid}`);
   }
-  return { parentPid: Number(match[1]), state: match[2], start: match[3].replace(/\s+/g, " "), command: match[4] ?? "" };
+  return { parentPid: Number(match[1]), state: match[2], tty: psTty(match[3]), start: match[4].replace(/\s+/g, " "), command: match[5] ?? "" };
 }
 
 async function macFacts(pid: number): Promise<ProcessFacts | null> {
@@ -394,7 +446,7 @@ async function macFacts(pid: number): Promise<ProcessFacts | null> {
   // ps gives the start to the second only: the command line must match too.
   const after = await macPs(pid);
   if (!after) return null;
-  if (after.start !== before.start || after.command !== before.command) throw new Error(`process ${pid} changed while it was read`);
+  if (after.start !== before.start || after.command !== before.command || after.tty !== before.tty) throw new Error(`process ${pid} changed while it was read`);
   const startedAtMs = Date.parse(after.start);
   return {
     pid,
@@ -402,6 +454,7 @@ async function macFacts(pid: number): Promise<ProcessFacts | null> {
     start: after.start,
     startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : null,
     cwd,
+    tty: after.tty,
     command: after.command,
     argv: after.command.split(/\s+/).filter(Boolean),
     argvExact: false,
@@ -423,47 +476,85 @@ async function macTable(): Promise<Array<{ pid: number; parentPid: number }> | n
 }
 
 // Right before a signal, synchronously: the same start, the same raw
-// arguments, and a working directory inside the worktree that its link's
-// text truly names (same device and inode). Any read that fails is "no".
+// arguments, the same terminal (none, unless it was a pane's), and a working
+// directory inside the worktree that its link's text truly names (same
+// device and inode). Any read that fails is a no, with why.
 //
 // What stays open without a pidfd (Node has none): the process can exit and
 // its pid be taken by another between these reads and kill(), a window of a
 // few system calls in which the pid space would have to wrap around. Linux
 // binds to the start in clock ticks plus the raw arguments plus the folder;
 // macOS to the start to the second plus ps's argument line plus the folder.
-function linuxSameNow(pid: number, expect: { start: string; commandKey: string; real: string }): boolean {
+function linuxSameNow(target: SignalTarget, real: string): true | string {
+  const { pid } = target;
   try {
     const stat = linuxStat(readFileSync(`/proc/${pid}/stat`, "utf8"));
-    if (!stat || stat.ticks !== expect.start || stat.state === "Z" || stat.state === "X") return false;
-    if (argvKeyOf(readFileSync(`/proc/${pid}/cmdline`)) !== expect.commandKey) return false;
+    if (!stat || stat.ticks !== target.start || stat.state === "Z" || stat.state === "X") return CHANGED;
+    if (stat.tty !== target.tty) return ATTACHED;
+    if (argvKeyOf(readFileSync(`/proc/${pid}/cmdline`)) !== target.commandKey) return CHANGED;
     const text = readlinkSync(`/proc/${pid}/cwd`);
     const here = statSync(`/proc/${pid}/cwd`);
     const named = statSync(text);
-    return named.dev === here.dev && named.ino === here.ino && isAtOrUnder(text, expect.real);
+    return named.dev === here.dev && named.ino === here.ino && isAtOrUnder(text, real) ? true : CHANGED;
   } catch {
-    return false;
+    return CHANGED;
   }
 }
 
-const PS_START_ARGS = /^\s*(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s?(.*)$/;
+/** How long one synchronous read may hold Codara's main process at a signal (macOS). */
+export const SIGNAL_READ_TIMEOUT_MS = 500;
 
-function macSameNow(pid: number, expect: { start: string; commandKey: string; real: string }): boolean {
+const PS_NOW = /^\s*(\d+)\s+(\S+)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s?(.*)$/;
+
+type SyncRun = (file: string, args: string[]) => { stdout: string; timedOut: boolean };
+
+function syncRun(file: string, args: string[]): { stdout: string; timedOut: boolean } {
   try {
-    const sync = (file: string, args: string[]) =>
-      execFileSync(file, args, { env: psTimeEnvironment(), timeout: 2_000, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-    const match = PS_START_ARGS.exec(sync("ps", ["-o", "lstart=,args=", "-p", String(pid)]).split(/\r?\n/)[0] ?? "");
-    if (!match || match[1].replace(/\s+/g, " ") !== expect.start || argvKeyOf(match[2] ?? "") !== expect.commandKey) return false;
-    let listed = "";
-    try {
-      listed = sync("/usr/sbin/lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"]);
-    } catch (err) {
-      listed = String((err as { stdout?: unknown }).stdout ?? "");
-    }
-    const cwd = listed.split(/\r?\n/).find((line) => line.startsWith("n/"))?.slice(1);
-    return cwd !== undefined && isAtOrUnder(cwd, expect.real);
-  } catch {
-    return false;
+    const stdout = execFileSync(file, args, {
+      env: psTimeEnvironment(),
+      timeout: SIGNAL_READ_TIMEOUT_MS,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return { stdout, timedOut: false };
+  } catch (err) {
+    const failure = err as { code?: unknown; signal?: unknown; stdout?: unknown };
+    // ps and lsof exit 1 when one pid is gone, and still list the others.
+    return { stdout: String(failure.stdout ?? ""), timedOut: failure.code === "ETIMEDOUT" || failure.signal === "SIGTERM" };
   }
+}
+
+/**
+ * macOS: one ps and one lsof for every target at once, each cut off after
+ * SIGNAL_READ_TIMEOUT_MS; one that did not answer in time sends nothing.
+ */
+export function macSameNow(targets: readonly SignalTarget[], real: string, exec: SyncRun = syncRun): Map<number, true | string> {
+  const out = new Map<number, true | string>();
+  if (!targets.length) return out;
+  const list = targets.map((target) => String(target.pid)).join(",");
+  const ps = exec("ps", ["-o", "pid=,tty=,lstart=,args=", "-p", list]);
+  if (ps.timedOut) return new Map(targets.map((target) => [target.pid, SLOW]));
+  const rows = new Map<number, { tty: string | null; start: string; args: string }>();
+  for (const line of ps.stdout.split(/\r?\n/)) {
+    const match = PS_NOW.exec(line);
+    if (match) rows.set(Number(match[1]), { tty: psTty(match[2]), start: match[3].replace(/\s+/g, " "), args: match[4] ?? "" });
+  }
+  const lsof = exec("/usr/sbin/lsof", ["-a", "-p", list, "-d", "cwd", "-Fpn"]);
+  if (lsof.timedOut) return new Map(targets.map((target) => [target.pid, SLOW]));
+  const cwds = new Map<number, string>();
+  let current = 0;
+  for (const line of lsof.stdout.split(/\r?\n/)) {
+    if (line.startsWith("p")) current = Number(line.slice(1));
+    else if (line.startsWith("n/") && current) cwds.set(current, line.slice(1));
+  }
+  for (const target of targets) {
+    const row = rows.get(target.pid);
+    const cwd = cwds.get(target.pid);
+    if (!row || row.start !== target.start || argvKeyOf(row.args) !== target.commandKey) out.set(target.pid, CHANGED);
+    else if (row.tty !== target.tty) out.set(target.pid, ATTACHED);
+    else out.set(target.pid, cwd !== undefined && isAtOrUnder(cwd, real) ? true : CHANGED);
+  }
+  return out;
 }
 
 /** The real system on Linux and macOS; null elsewhere, where a process inside keeps holding the worktree. */
@@ -475,12 +566,26 @@ export function systemLeftovers(options: { appPid: number; sessionPids: () => re
     sessionPids: options.sessionPids,
     facts: linux ? linuxFacts : macFacts,
     table: linux ? linuxTable : macTable,
-    signal: (pid, signal, expect) => {
-      // One process, never a group, init or Codara itself.
-      if (!Number.isSafeInteger(pid) || pid <= 1 || pid === options.appPid) return false;
-      if (!(linux ? linuxSameNow : macSameNow)(pid, expect)) return false;
-      process.kill(pid, signal);
-      return true;
+    signal: (targets, signal, real) => {
+      // One process at a time, never a group, init or Codara itself.
+      const valid = targets.filter(({ pid }) => Number.isSafeInteger(pid) && pid > 1 && pid !== options.appPid);
+      const verdicts = linux ? new Map(valid.map((target) => [target.pid, linuxSameNow(target, real)])) : macSameNow(valid, real);
+      const out = new Map<number, true | string>(targets.map(({ pid }) => [pid, "it is not a process that may be stopped"]));
+      // Nothing awaited between the reads and here.
+      for (const { pid } of valid) {
+        const verdict = verdicts.get(pid) ?? CHANGED;
+        if (verdict !== true) {
+          out.set(pid, verdict);
+          continue;
+        }
+        try {
+          process.kill(pid, signal);
+          out.set(pid, true);
+        } catch {
+          out.set(pid, CHANGED);
+        }
+      }
+      return out;
     },
     wait: (ms) => new Promise((done) => setTimeout(done, ms)),
     now: () => Date.now(),

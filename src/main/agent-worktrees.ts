@@ -3936,8 +3936,13 @@ export async function scanProcessesUnderCwd(
   if (!found) return null;
   // Those whose folder could not be placed count here as uses too: this
   // list holds a folder, and before, a deleted folder's text matched it.
+  // Not once the folder is gone: then they point into a deleted folder.
   const placed = found.get(dir) ?? [];
-  const unplaced = (found.cwdUnknown?.get(dir) ?? []).filter((entry) => !placed.some((seen) => seen.pid === entry.pid));
+  const gone = await fsp.stat(dir).then(
+    () => false,
+    (err: NodeJS.ErrnoException) => err?.code === "ENOENT",
+  );
+  const unplaced = gone ? [] : (found.cwdUnknown?.get(dir) ?? []).filter((entry) => !placed.some((seen) => seen.pid === entry.pid));
   const list: ProcessUseList = [...placed, ...unplaced];
   if (found.openFilesUnknown) list.openFilesUnknown = true;
   return list;
@@ -4107,7 +4112,9 @@ export async function scanProcessesUnderCwds(
       }
       const under = (dir: string) => {
         const rest = hint.slice(dir.length);
-        return hint.startsWith(dir) && (rest === "" || rest.startsWith("/") || rest.startsWith(" "));
+        // The folder itself, below it, or the folder deleted: never a
+        // sibling whose name only starts the same ("wt 2", "wt-2").
+        return hint.startsWith(dir) && (rest === "" || rest.startsWith("/") || rest === " (deleted)");
       };
       for (const dir of dirs.filter(under)) {
         const list = unknown.get(dir) ?? [];
