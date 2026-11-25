@@ -265,44 +265,53 @@ async function main() {
     assert.equal(presence.antigravityActivityVerdict("conv-x", () => ({ known: true, busy: "subagent" })).detail, "a subagent is working");
     assert.equal(presence.antigravityActivityVerdict("continue", () => ({ known: true, busy: null })).ok, false);
     if (process.platform === "linux") {
-      // Wake: an agy started through a link named otherwise still holds it.
+      // Wake finds holders by the lock file itself: a process whose program
+      // is not named agy at all (this node, as "holder") still blocks it,
+      // and so does the sleep check of the pane's other processes.
       const realHome = process.env.HOME;
       const home = path.join(dir, "home-wake");
       const store = path.join(home, ".gemini", "antigravity-cli", "presence");
-      const bin = path.join(dir, "wake-bin");
       fs.mkdirSync(store, { recursive: true });
-      fs.mkdirSync(bin, { recursive: true });
-      // A program whose file is named agy: this node, linked or copied (a
-      // copied sleep may be a multi-call binary that will not run renamed).
-      try {
-        fs.linkSync(process.execPath, path.join(bin, "agy"));
-      } catch {
-        fs.copyFileSync(process.execPath, path.join(bin, "agy"));
-        fs.chmodSync(path.join(bin, "agy"), 0o755);
-      }
-      fs.symlinkSync(path.join(bin, "agy"), path.join(bin, "antigravity"));
       const held = fs.openSync(path.join(store, "conv-w.lock"), "w");
-      const holder = require("node:child_process").spawn(path.join(bin, "antigravity"), ["-e", "setTimeout(() => {}, 30000)"], {
+      const holder = require("node:child_process").spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
+        argv0: "holder",
         stdio: ["ignore", held, "ignore"],
         env: {},
       });
       fs.closeSync(held);
       try {
-        await new Promise((resolve) => setTimeout(resolve, 200));
+        await new Promise((resolve) => setTimeout(resolve, 300));
         assert.equal(holder.exitCode, null, "the lock holder must still run");
         process.env.HOME = home;
-        const listed = async () => [{ pid: holder.pid, command: `${path.join(bin, "antigravity")} -e setTimeout` }];
-        assert.equal(
-          await presence.antigravityConversationHeld("conv-w", () => ({ known: true, busy: null }), listed),
-          true,
-          "an agy run through a link named otherwise was missed",
-        );
-        assert.equal(await presence.antigravityConversationHeld("conv-free", () => ({ known: true, busy: null }), listed), false);
+        const idleConv = () => ({ known: true, busy: null });
+        assert.deepEqual(await presence.antigravityLockHolders("conv-w"), [holder.pid], "the lock's holder was not found by the file");
+        assert.equal(await presence.antigravityConversationHeld("conv-w", idleConv), true, "a holder not named agy did not block the wake");
+        assert.equal(await presence.antigravityConversationHeld("conv-free", idleConv), false);
+        // Sleep: the paned agy (here: a process holding nothing) is idle, but
+        // another process in the pane holds a conversation lock.
+        const quiet = require("node:child_process").spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore", env: {} });
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          const readers = { open: (pid) => presence.antigravityOpenConversations(pid, "linux"), activity: idleConv };
+          const alone = await presence.antigravitySleepVerdict(quiet.pid, "agy", "conv-w", { ...readers, open: async () => ["conv-w"] }, []);
+          assert.equal(alone.ok, true, "the control case must sleep");
+          const verdict = await presence.antigravitySleepVerdict(quiet.pid, "agy", "conv-w", { ...readers, open: async (pid) => (pid === quiet.pid ? ["conv-w"] : readers.open(pid)) }, [holder.pid]);
+          assert.equal(verdict.ok, false, "a second holder in the pane was not seen");
+          assert.equal(verdict.reason, "other-processes");
+        } finally {
+          quiet.kill();
+        }
       } finally {
         process.env.HOME = realHome;
         holder.kill();
       }
     }
+    // Wake: the lookup by the lock file must be complete.
+    assert.equal(await presence.antigravityConversationHeld("conv-x", () => ({ known: true, busy: null }), async () => null), null);
+    assert.equal(await presence.antigravityConversationHeld("conv-x", () => ({ known: true, busy: null }), async () => [42]), true);
+    assert.equal(await presence.antigravityConversationHeld("conv-x", () => ({ known: true, busy: null }), async () => []), false);
+    assert.equal(await presence.antigravityLockHolders("conv-x", "win32", presenceDir), null, "Windows cannot look it up: unknown");
+    assert.deepEqual(presence.lsofPids("p12\nf3\np34\n"), [12, 34]);
     // Wake: a conversation agy no longer lists is not free to reopen.
     assert.equal(await presence.antigravityConversationHeld("conv-x", () => ({ known: false, busy: null })), "missing");
     assert.equal(await presence.antigravityConversationHeld("conv-x", () => ({ known: true, busy: "subagent" })), true);

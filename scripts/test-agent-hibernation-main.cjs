@@ -282,14 +282,23 @@ async function main() {
         t.state.evidence.runtime = "antigravity";
         t.state.open = ["conv-1"];
         t.state.activity = { known: true, busy: null };
-        t.deps.antigravity = (pid, command, conversationId) =>
-          presence.antigravitySleepVerdict(pid, command, conversationId, {
-            open: async (openPid) => {
-              t.calls.openPid = openPid;
-              return t.state.open;
+        // The paned agy (101) holds t.state.open; every other process in the
+        // pane holds what t.state.others says, nothing by default.
+        t.state.others = {};
+        t.deps.antigravity = (pid, command, conversationId, otherPids) =>
+          presence.antigravitySleepVerdict(
+            pid,
+            command,
+            conversationId,
+            {
+              open: async (openPid) => {
+                if (openPid === pid) t.calls.openPid = openPid;
+                return openPid === pid ? t.state.open : openPid in t.state.others ? t.state.others[openPid] : [];
+              },
+              activity: () => t.state.activity,
             },
-            activity: () => t.state.activity,
-          });
+            otherPids,
+          );
         t.deps.antigravityActivity = (id) => presence.antigravityActivityVerdict(id, () => t.state.finalActivity ?? t.state.activity);
         mutate?.(t);
       },
@@ -377,6 +386,23 @@ async function main() {
       {},
       "conversation-unknown",
       "agy has another conversation open",
+    ],
+    [
+      "a second holder started through a link named otherwise",
+      (t) => {
+        t.state.processes.push({ pid: 107, parentPid: 101, startMs: NOW - 200 * MIN + 1_000, command: "/opt/tools/antigravity" });
+        t.state.others[107] = ["conv-9"];
+      },
+      {},
+      "other-processes",
+      "another process in the pane holds an agy conversation",
+    ],
+    [
+      "a process in the pane whose files cannot be read",
+      (t) => (t.state.others[102] = null),
+      {},
+      "conversation-unknown",
+      "a process in the pane could not be read",
     ],
     ["no last look at agy's flags", (t) => delete t.deps.antigravityActivity, {}, "conversation-unknown", "agy could not be checked"],
     ["no way to check agy at all", (t) => delete t.deps.antigravity, {}, "conversation-unknown", "agy could not be checked"],

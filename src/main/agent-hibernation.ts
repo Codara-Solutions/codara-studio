@@ -138,7 +138,14 @@ export interface AgentHibernationDeps {
   ) => Promise<AgentSleepSummary | null>;
   // Antigravity: may the agy process the census found be stopped for the
   // pane to reopen `conversationId`? (antigravity-presence.ts)
-  antigravity?: (agentPid: number, agentCommand: string, conversationId: string | undefined) => Promise<AntigravitySleepVerdict>;
+  // otherPids: every other process the stop would end, none of which may
+  // hold an agy conversation.
+  antigravity?: (
+    agentPid: number,
+    agentCommand: string,
+    conversationId: string | undefined,
+    otherPids: readonly number[],
+  ) => Promise<AntigravitySleepVerdict>;
   // Antigravity: agy's busy flags for the conversation, read synchronously
   // as the last thing before the stop.
   antigravityActivity?: (conversationId: string) => AntigravitySleepVerdict;
@@ -294,7 +301,8 @@ const defaultDeps: AgentHibernationDeps = {
   watchedOnPhone: (paneId) => studioPaneWatchedFromPhone(paneId),
   sleepOutput: (paneId) => pty.sleepOutput(paneId, MAX_SLEEPING_OUTPUT_BYTES),
   describe: describePane,
-  antigravity: (agentPid, agentCommand, conversationId) => antigravitySleepVerdict(agentPid, agentCommand, conversationId),
+  antigravity: (agentPid, agentCommand, conversationId, otherPids) =>
+    antigravitySleepVerdict(agentPid, agentCommand, conversationId, undefined, otherPids),
   antigravityActivity: (conversationId) => antigravityActivityVerdict(conversationId),
 };
 
@@ -748,7 +756,7 @@ async function decide(
   if (request.runtime === "antigravity") {
     const agentCommand = processes.find((entry) => entry.pid === census.agentPid)?.command ?? "";
     const verdict = deps.antigravity
-      ? await deps.antigravity(census.agentPid, agentCommand, request.conversationId).catch(() => null)
+      ? await deps.antigravity(census.agentPid, agentCommand, request.conversationId, census.pids).catch(() => null)
       : null;
     if (!verdict) return { ok: false, reason: "conversation-unknown", detail: "agy could not be checked" };
     if (!verdict.ok) return { ok: false, reason: verdict.reason, detail: verdict.detail };
@@ -776,7 +784,7 @@ async function decide(
     // agy may have moved to another conversation during the re-census: the
     // open conversation and flags again, for the same process.
     const recheck = deps.antigravity
-      ? await deps.antigravity(census.agentPid, agentCommand, request.conversationId).catch(() => null)
+      ? await deps.antigravity(census.agentPid, agentCommand, request.conversationId, census.pids).catch(() => null)
       : null;
     if (!recheck) return { ok: false, reason: "conversation-unknown", detail: "agy could not be checked" };
     if (!recheck.ok) return { ok: false, reason: recheck.reason, detail: recheck.detail };
