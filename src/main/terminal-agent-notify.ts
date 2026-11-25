@@ -322,6 +322,10 @@ interface PaneWatcher {
   lastOutputAt: number;
   // Last RuntimeState pushed to the renderer chip; dedups the chip channel.
   lastEmittedState: RuntimeState | null;
+  // For the worktree idle clock: since when the agent has been at work (in a
+  // turn, in the background, or blocked inside one), and in which folder.
+  clockBusySince: number | null;
+  clockCwd: string | null;
 }
 
 const watchers = new Map<string, PaneWatcher>();
@@ -482,6 +486,8 @@ export function syncTerminalNotifyPanes(input: {
       agentProcCheckInflight: false,
       lastOutputAt: 0,
       lastEmittedState: null,
+      clockBusySince: null,
+      clockCwd: null,
     };
     watchers.set(entry.paneId, watcher);
     attach(watcher);
@@ -602,7 +608,7 @@ function removeWatcher(paneId: string): void {
   if (!w) return;
   tanLog(`pane=${paneId} watcher removed`);
   // Closed mid-turn: the turn ends now.
-  if (w.lastEmittedState !== null && clockActive(w, w.lastEmittedState)) noteTurnAt(w, Date.now());
+  if (w.clockBusySince !== null) noteTurnAt(w, Date.now());
   watchers.delete(paneId);
   for (const listener of paneRemovedListeners) {
     try {
@@ -635,6 +641,10 @@ function removeWatcher(paneId: string): void {
 // Everything that belongs to one agent session in the pane. A new agent
 // (or the same CLI relaunched) starts with no turn and no trusted signals.
 function resetAgentSession(w: PaneWatcher): void {
+  // The agent's work, if any, ends here.
+  if (w.clockBusySince !== null) noteTurnAt(w, Date.now());
+  w.clockBusySince = null;
+  w.clockCwd = null;
   cancelPendingDone(w, "agent session reset");
   clearCodexScreen(w);
   w.state = "idle";
@@ -2545,8 +2555,7 @@ function emitPaneState(w: PaneWatcher, chipState: RuntimeState): void {
   const previousState = w.lastEmittedState;
   w.lastEmittedState = chipState;
   const now = Date.now();
-  // A turn's start and its end, however it ended (done, interrupted, gone).
-  if ((previousState !== null && clockActive(w, previousState)) || clockActive(w, chipState)) noteTurnAt(w, now);
+  noteClockState(w, chipState, now);
   const workingSince = nextWorkingSince(previousState, chipState, w.activity.workingSince, now);
   // A prompt answered or gone takes its question with it.
   noteActivity(
@@ -2776,27 +2785,43 @@ export function terminalAgentActivitySnapshot(): TerminalAgentActivity[] {
 }
 
 // When an agent last started or ended a turn, per pane and folder it ran
-// in, with the pane's workspace: kept after the pane closes or its agent
-// restarts, for the worktree idle clock. Newest last; the oldest go past the
-// cap.
+// in, with the pane's workspace: kept after the pane closes, its agent
+// restarts or Codara restarts (persistTurnLedger), for the worktree idle
+// clock. Newest last; the oldest go past the cap or the age limit.
 const TURN_LEDGER_MAX = 500;
-const turnLedger = new Map<string, { at: number; workspaceId: string; cwd: string | null }>();
+const TURN_LEDGER_MAX_AGE_MS = 30 * 24 * 60 * 60_000;
+type TurnLedgerEntry = { at: number; workspaceId: string; cwd: string | null };
+const turnLedger = new Map<string, TurnLedgerEntry>();
+let turnLedgerFile: string | null = null;
+let turnLedgerSave: ReturnType<typeof setTimeout> | null = null;
 
-// The chip states of an agent at work: in a turn, or on work of its own in
-// the background. Blocked counts only inside a turn: a prompt at startup is
-// no work yet.
-function clockActive(w: PaneWatcher, state: RuntimeState): boolean {
-  if (state === "working" || state === "background" || state === "stalled") return true;
-  return state === "blocked" && w.turn !== null && !w.turn.announced;
+// A turn's start and its end, however it ended (done, interrupted, closed,
+// gone). Blocked counts only after work began: a prompt at startup is no
+// work yet, a permission asked inside a turn is.
+function noteClockState(w: PaneWatcher, state: RuntimeState, now: number): void {
+  const busy =
+    state === "working" ||
+    state === "background" ||
+    state === "stalled" ||
+    (state === "blocked" && (w.clockBusySince !== null || (w.turn !== null && !w.turn.announced)));
+  if (busy && w.clockBusySince === null) {
+    w.clockBusySince = now;
+    w.clockCwd = turnCwd(w);
+    noteTurnAt(w, now);
+  } else if (!busy && w.clockBusySince !== null) {
+    noteTurnAt(w, now);
+    w.clockBusySince = null;
+    w.clockCwd = null;
+  }
 }
 
-// The folder the pane's agent works in: the one its session reported, else
-// (on Linux) the terminal's foreground process's, else the shell's start.
-function turnCwd(paneId: string): string | null {
-  const reported = latestSessionStart(paneId)?.cwd;
-  if (reported) return reported;
+// The folder the pane's agent works in: the one the live session reported,
+// else (on Linux) the terminal's foreground process's, else the shell's start.
+function turnCwd(w: PaneWatcher): string | null {
+  const record = latestSessionStart(w.paneId);
+  if (record?.cwd && record.runtime === w.runtime && record.sessionId && record.sessionId === w.scheduledSession) return record.cwd;
   try {
-    const pid = process.platform === "linux" ? pty.sessionPid(paneId) : null;
+    const pid = process.platform === "linux" ? pty.sessionPid(w.paneId) : null;
     if (pid) {
       const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
       const foreground = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[5]);
@@ -2807,7 +2832,7 @@ function turnCwd(paneId: string): string | null {
     // A process that exited: the start folder.
   }
   try {
-    return pty.sessionCwd(paneId);
+    return pty.sessionCwd(w.paneId);
   } catch {
     return null;
   }
@@ -2816,19 +2841,76 @@ function turnCwd(paneId: string): string | null {
 function noteTurnAt(w: PaneWatcher, at: number): void {
   // Replayed output is history, not a turn now.
   if (w.excluded || !w.runtime || w.replayingTail) return;
-  const cwd = turnCwd(w.paneId);
+  // The folder the work began in, through to its end.
+  const cwd = w.clockCwd ?? turnCwd(w);
   const key = `${w.paneId}\u0000${cwd ?? ""}`;
   const before = turnLedger.get(key);
   turnLedger.delete(key);
   turnLedger.set(key, { at: Math.max(at, before?.at ?? 0), workspaceId: w.workspaceId, cwd });
   while (turnLedger.size > TURN_LEDGER_MAX) turnLedger.delete(turnLedger.keys().next().value as string);
+  scheduleTurnLedgerSave();
+}
+
+function scheduleTurnLedgerSave(): void {
+  if (!turnLedgerFile || turnLedgerSave) return;
+  turnLedgerSave = setTimeout(() => {
+    turnLedgerSave = null;
+    saveTurnLedger();
+  }, 5_000);
+  turnLedgerSave.unref?.();
+}
+
+function saveTurnLedger(): void {
+  const file = turnLedgerFile;
+  if (!file) return;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const temp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(temp, JSON.stringify([...turnLedger.entries()]), { mode: 0o600 });
+    fs.renameSync(temp, file);
+  } catch (err) {
+    console.warn("[terminal-agent-notify] could not save the agent turn times:", err);
+  }
+}
+
+/**
+ * Keeps the agent turn times in `file` across restarts: reads what is there
+ * now (newer times win), and writes each change a few seconds after it.
+ */
+export function persistTurnLedger(file: string, now = Date.now()): void {
+  turnLedgerFile = file;
+  let saved: unknown = null;
+  try {
+    saved = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    saved = null;
+  }
+  if (!Array.isArray(saved)) return;
+  for (const item of saved) {
+    if (!Array.isArray(item) || typeof item[0] !== "string") continue;
+    const entry = item[1] as Partial<TurnLedgerEntry> | null;
+    const at = Number(entry?.at);
+    if (!entry || !Number.isFinite(at) || now - at > TURN_LEDGER_MAX_AGE_MS || typeof entry.workspaceId !== "string") continue;
+    const cwd = typeof entry.cwd === "string" ? entry.cwd : null;
+    const current = turnLedger.get(item[0]);
+    if (current && current.at >= at) continue;
+    turnLedger.set(item[0], { at, workspaceId: entry.workspaceId, cwd });
+  }
+  while (turnLedger.size > TURN_LEDGER_MAX) turnLedger.delete(turnLedger.keys().next().value as string);
+}
+
+/** Writes the agent turn times now (at quit). */
+export function flushTurnLedger(): void {
+  if (turnLedgerSave) clearTimeout(turnLedgerSave);
+  turnLedgerSave = null;
+  saveTurnLedger();
 }
 
 /**
  * When an agent `include` takes (by the pane's workspace and the folder the
  * turn ran in) last had a turn: now while one runs or works in the
  * background, else when its last turn started or ended, also for a pane
- * closed since; null when none did since Codara started.
+ * closed since; null when none did.
  */
 export function terminalAgentLastTurnAt(include: (workspaceId: string, cwd: string | null) => boolean, now = Date.now()): number | null {
   let latest: number | null = null;
@@ -2837,8 +2919,8 @@ export function terminalAgentLastTurnAt(include: (workspaceId: string, cwd: stri
   };
   for (const entry of turnLedger.values()) if (include(entry.workspaceId, entry.cwd)) seen(entry.at);
   for (const w of watchers.values()) {
-    if (w.excluded || w.disposing || !w.runtime || w.lastEmittedState === null || !clockActive(w, w.lastEmittedState)) continue;
-    if (include(w.workspaceId, turnCwd(w.paneId))) seen(now);
+    if (w.excluded || w.disposing || !w.runtime || w.clockBusySince === null) continue;
+    if (include(w.workspaceId, w.clockCwd)) seen(now);
   }
   return latest;
 }
@@ -2846,6 +2928,9 @@ export function terminalAgentLastTurnAt(include: (workspaceId: string, cwd: stri
 // Tests only: forget every recorded turn.
 export function __resetTurnLedgerForTests(): void {
   turnLedger.clear();
+  turnLedgerFile = null;
+  if (turnLedgerSave) clearTimeout(turnLedgerSave);
+  turnLedgerSave = null;
 }
 
 // What codara_session_status reads of one pane; null when no watcher holds it.

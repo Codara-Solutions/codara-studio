@@ -1539,10 +1539,16 @@ async function main() {
   T.cwds.set("mover", "/work/b");
   await shortTurn("second");
   check("idle clock: a turn in another folder leaves the first folder's time", folder("/work/a") === firstEnd && folder("/work/b") > firstEnd);
-  T.sessions = new Map([["mover", { cwd: "/work/c" }]]);
+  // An old session's record names another folder: not this session's.
+  T.sessions = new Map([["mover", { paneId: "mover", runtime: "claude", sessionId: "old-session", cwd: "/work/old" }]]);
   await sleep(60_000);
   await shortTurn("third");
-  check("idle clock: the folder the agent reported wins", folder("/work/c") > folder("/work/b"));
+  check("idle clock: an old session's folder is not credited", folder("/work/old") === null && folder("/work/b") > firstEnd);
+  T.sessions = new Map([["mover", { paneId: "mover", runtime: "claude", sessionId: "22222222-mover", cwd: "/work/c" }]]);
+  mod.noteTerminalHookEvent("mover", "SessionStart", { session_id: "22222222-mover", source: "startup" });
+  await sleep(60_000);
+  await shortTurn("fourth");
+  check("idle clock: the folder the live session reported wins", folder("/work/c") > folder("/work/b"));
   T.sessions = new Map();
   // A prompt at startup, before any turn, is no work yet.
   mod.syncTerminalNotifyPanes({ workspaceId: "ws-prompt", panes: [
@@ -1553,6 +1559,32 @@ async function main() {
   const promptChip = [...T.chips].reverse().find((chip) => chip.paneId === "prompt");
   check("idle clock: the startup prompt shows as blocked", promptChip?.state === "blocked");
   check("idle clock: a startup prompt is not a turn", mod.terminalAgentLastTurnAt((id) => id === "ws-prompt") === null);
+  // A permission asked inside work keeps the clock at now.
+  const beforeAsk = Date.now();
+  mod.noteTerminalUserInput("prompt", "1\r");
+  feed("prompt", "\x1b[2J\x1b[H\x1b]9;4;1;10\x07");
+  await sleep(1500);
+  feed("prompt", "Do you want to make this edit?\r\n❯ 1. Yes\r\n  2. No\r\n\r\nEsc to cancel");
+  await sleep(500);
+  const askChip = [...T.chips].reverse().find((chip) => chip.paneId === "prompt");
+  if (askChip?.state === "blocked") {
+    await sleep(60_000);
+    check("idle clock: blocked inside work reads as now", mod.terminalAgentLastTurnAt((id) => id === "ws-prompt") === Date.now());
+  }
+  check("idle clock: work after the prompt counts", (mod.terminalAgentLastTurnAt((id) => id === "ws-prompt") ?? 0) >= beforeAsk);
+  // Times survive a restart through the saved file.
+  const ledgerFile = path.join(os.tmpdir(), `spark-tan-turns-${process.pid}.json`);
+  fs.rmSync(ledgerFile, { force: true });
+  mod.persistTurnLedger(ledgerFile);
+  const savedA = folder("/work/a");
+  mod.flushTurnLedger();
+  mod.__resetTurnLedgerForTests();
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-mover", panes: [] });
+  check("idle clock: a restart forgets without the file", folder("/work/a") === null);
+  mod.persistTurnLedger(ledgerFile);
+  check("idle clock: the saved times come back after a restart", folder("/work/a") === savedA);
+  mod.__resetTurnLedgerForTests();
+  fs.rmSync(ledgerFile, { force: true });
 
   mod.disposeAllTerminalAgentWatchers();
   check("explicit watcher disposal detaches every tap", T.taps.size === 0);

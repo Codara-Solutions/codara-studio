@@ -117,9 +117,25 @@ async function main() {
       git(tree, ["checkout", "-q", "--", "notes.md"]);
       fs.utimesSync(tree, old, old);
       assert.equal(days(await inspect.lastWorkAt(tree, head, repo, now - 3 * DAY)), 3, "an agent's last turn");
-      // A status that cannot be read: the cautious clock, never an older one.
+      // A whole tracked folder deleted: the nearest folder still there.
+      fs.mkdirSync(path.join(tree, "docs", "deep"), { recursive: true });
+      fs.writeFileSync(path.join(tree, "docs", "deep", "page.md"), "page\n");
+      git(tree, ["add", "docs"]);
+      git(tree, ["commit", "-q", "-m", "docs"], dated);
+      const withDocs = git(tree, ["rev-parse", "HEAD"]);
+      fs.utimesSync(tree, old, old);
+      fs.rmSync(path.join(tree, "docs"), { recursive: true });
+      assert.equal(days(await inspect.lastWorkAt(tree, withDocs, repo, null)), 0, "a deleted folder");
+      git(tree, ["checkout", "-q", "--", "docs"]);
+      git(tree, ["reset", "-q", "--hard", head]);
+      // A status that cannot be read, or more changed files than it reads one
+      // by one: unknown, never an old guess.
       gitTouches();
-      assert.equal(days(await inspect.lastWorkAt(tree, head, repo, null, null)), 0);
+      assert.equal(await inspect.lastWorkAt(tree, head, repo, null, null), null);
+      fs.mkdirSync(path.join(tree, "many"));
+      for (let i = 0; i < 201; i += 1) fs.writeFileSync(path.join(tree, "many", `f${i}.txt`), "x\n");
+      assert.equal(await inspect.lastWorkAt(tree, head, repo, null), null, "201 new files");
+      fs.rmSync(path.join(tree, "many"), { recursive: true });
     });
 
     // ── The cleanup screen and the advice ──────────────────────────────────

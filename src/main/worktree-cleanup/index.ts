@@ -118,7 +118,8 @@ function deps(invalidateGitCache: (cwd: string) => void): WorktreeCleanupDeps {
     lastAgentTurnAt: (workspaceIds, dirs) => {
       const ids = new Set(workspaceIds);
       const inside = (cwd: string | null) => !!cwd && dirs.some((dir) => cwd === dir || cwd.startsWith(dir.endsWith(sep) ? dir : `${dir}${sep}`));
-      return terminalAgentLastTurnAt((workspaceId, cwd) => ids.has(workspaceId) || inside(cwd));
+      // By the folder the turn ran in; by the pane's workspace when unknown.
+      return terminalAgentLastTurnAt((workspaceId, cwd) => (cwd ? inside(cwd) : ids.has(workspaceId)));
     },
     archiveRoot: () => worktreeArchiveRoot(codaraHome()),
     leftovers: systemLeftovers({ appPid: process.pid, sessionPids: () => pty.sessionPids() }),

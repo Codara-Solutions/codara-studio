@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, promises as fsp } from "node:fs";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { isRemotePath } from "@shared/remote";
 import { isDefaultTabTitle } from "@shared/tab-default-titles";
 import type { AppState, CopyBranchCreator, RunState, Workspace } from "@shared/types";
@@ -870,8 +870,8 @@ const WORK_PATHS_READ = 200;
  * new, and the last turn of an agent in it. Not git's own index, logs/HEAD
  * and HEAD, which a status or a fetch rewrites with nobody there; the rule
  * that refuses a removal right after a touch keeps them (lastActivity). A
- * status that could not be read, or too many changed files, adds that
- * cautious clock back.
+ * status that could not be read, or too many changed files to read, is
+ * null: unknown, so nothing reads as idle or stale on a guess.
  */
 export async function lastWorkAt(
   path: string,
@@ -890,15 +890,18 @@ export async function lastWorkAt(
     if (Number.isFinite(seconds) && seconds > 0) times.push(seconds * 1000);
   }
   const paths = changed ? [...changed.tracked, ...changed.untracked] : [];
-  if (!changed || paths.length > WORK_PATHS_READ) {
-    const cautious = await lastActivity(path, head, root);
-    if (cautious !== null) times.push(cautious);
-  } else {
-    for (const entry of paths) {
-      // A deleted file leaves its folder's time.
-      const stat = (await fsp.lstat(join(path, entry)).catch(() => null)) ?? (await fsp.lstat(join(path, entry, "..")).catch(() => null));
-      if (stat) times.push(stat.mtimeMs);
+  // Files it cannot read one by one: when anyone last worked is unknown,
+  // never an old guess.
+  if (!changed || paths.length > WORK_PATHS_READ) return null;
+  for (const entry of paths) {
+    // A deleted file or folder leaves the time of the nearest folder still there.
+    let at = join(path, entry);
+    let stat = await fsp.lstat(at).catch(() => null);
+    while (!stat && at.length > path.length) {
+      at = dirname(at);
+      stat = await fsp.lstat(at).catch(() => null);
     }
+    if (stat) times.push(stat.mtimeMs);
   }
   return times.length ? Math.max(...times) : null;
 }

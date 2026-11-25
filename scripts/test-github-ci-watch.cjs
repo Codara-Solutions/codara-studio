@@ -1108,6 +1108,15 @@ test("readRepositoryPullRequests: one open list and one query for every other br
   };
   assert.equal((await mod.readRepositoryPullRequests(crowded, [item("main")])).get("/main").number, 6, "its own, asked alone");
   assert.equal(calls.filter((url) => url.includes("pulls?head=")).length, 1);
+  // A full page whose only one of its own is closed may hide a newer open
+  // one past it: asked alone.
+  calls.length = 0;
+  const hidden = {
+    get: async (url) => (url.includes("pulls?head=") ? (calls.push(url), { value: [listed(11, "feat/h")] }) : reader.get(url)),
+    graphql: async () => ({ data: { repository: { b0: { nodes: [...Array.from({ length: 9 }, (_, i) => node(200 + i, `fork-${i}`)), node(40, "acme")] }, parent: null } } }),
+  };
+  assert.equal((await mod.readRepositoryPullRequests(hidden, [item("feat/h")])).get("/feat/h").number, 11);
+  assert.equal(calls.filter((url) => url.includes("pulls?head=")).length, 1);
   // A refused query errs its rows, to be asked again after the backoff, and
   // asks no branch alone.
   calls.length = 0;
@@ -1239,11 +1248,11 @@ test("a row the read answers early applies before the rest of its repository", a
   assert.equal(shown().get("ws-late"), 8);
 });
 
-test("a cancelled or stale run is no failure; the newest run of a check decides", ({ mod }) => {
+test("a cancelled run is no failure, a stale required one is; the newest run of a check decides", ({ mod }) => {
   const view = (runs) => mod.summarizeRestChecks({ check_runs: runs }, null);
   const at = (minute) => `2026-10-01T10:${String(minute).padStart(2, "0")}:00Z`;
   assert.deepEqual(view([run("build", "completed", "cancelled")]), { failed: [], failedAt: 0, pending: 0, passed: 0 });
-  assert.deepEqual(view([run("build", "completed", "stale")]).failed, []);
+  assert.deepEqual(view([run("build", "completed", "stale"), run("lint", "completed", "success")]).failed, ["build"], "a stale required check still blocks");
   // Superseded: the run of another suite was cancelled when the newer one started.
   const cancelled = { ...run("build", "completed", "cancelled", { started: at(0), completed: at(2) }), check_suite: { id: 1 } };
   const passing = { ...run("build", "completed", "success", { started: at(1), completed: at(6) }), check_suite: { id: 2 } };

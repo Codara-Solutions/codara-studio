@@ -81,9 +81,11 @@ import { listProcessesWithCommands } from "./owned-process-tree";
 import { defaultPersonalCodexHomeDir } from "./orchestration/codex-cli-account-profiles";
 import {
   activeTerminalAgentPaneIds,
+  flushTurnLedger,
   manualTerminalPaneIds,
   noteCodexNotifyInstalled,
   noteHostResume,
+  persistTurnLedger,
   terminalAgentsMidTurn,
 } from "./terminal-agent-notify";
 import { collectLiveWork, hasLiveWork, quitPromptText, type LiveWork } from "./quit-guard";
@@ -1412,6 +1414,8 @@ app.whenReady().then(async () => {
   // feature: delete the pointer symlinks and generated env.sh it kept under
   // <codara-home>/cli/active/. Once they are gone this is a no-op, and
   // anything unrecognized in that directory is left alone and logged.
+  // The worktree idle clock remembers agent turns across restarts.
+  persistTurnLedger(join(codaraHome(), "agent-turns.json"));
   void cleanupNativeCliActivePointerArtifacts(codaraHome())
     .then((result) => {
       for (const refusal of result.refused) {
@@ -2052,6 +2056,7 @@ app.on("before-quit", (event) => {
   }
   // Past the prompt this quit ends the process: a GPU exit is no crash now.
   gpuDrawingQuitGoingAhead("before-quit");
+  flushTurnLedger();
   // Flag the quit BEFORE anything else. Otherwise the async cleanup below
   // preventDefault()s this quit, then later re-calls app.quit() — and on that
   // second pass the window `close` handler would still see isQuitting === false

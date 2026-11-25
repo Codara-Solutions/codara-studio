@@ -616,11 +616,11 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
 // ── Reading a pull request from GitHub's REST API ───────────────────────────
 
 const SUCCESS_STATES = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
-const FAILED_STATES = new Set(["FAILURE", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
-// A run cancelled (by hand, or because a newer run of it started) or left
-// stale by GitHub did not fail: no failure to tell anyone about, and nothing
-// still running either.
-const SETTLED_STATES = new Set(["CANCELLED", "STALE"]);
+// STALE: GitHub gave up on a required check, which still blocks the merge.
+const FAILED_STATES = new Set(["FAILURE", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"]);
+// A run cancelled (by hand, or because a newer run of it started) did not
+// fail: no failure to tell anyone about, and nothing still running either.
+const SETTLED_STATES = new Set(["CANCELLED"]);
 
 // GitHub writes 0001-01-01T00:00:00Z for a time it does not have.
 function githubTime(value: unknown): number {
@@ -972,7 +972,11 @@ async function branchesPulls(
           head: { sha: pull.headRefOid, label: `${login}:${branch}` },
         }];
       });
-      return { pull: parseRestPullRequest(rest), complete: rest.length > 0 || nodes.length < PULLS_PER_BRANCH };
+      const pull = parseRestPullRequest(rest);
+      // A full page may hide an open one of its own: only an open one, or a
+      // page with room left, settles the branch.
+      const complete = nodes.length < PULLS_PER_BRANCH || (pull !== null && (pull.phase === "open" || pull.phase === "draft"));
+      return { pull: complete ? pull : null, complete };
     };
     const own = pick(repo);
     if (own.pull) return void found.set(branch, own.pull);
