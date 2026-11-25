@@ -260,6 +260,17 @@ export interface WorktreeCleanupApprovalItem {
   reason: string;
   /** Null when the user may tick it; otherwise why it can never be removed here. */
   blocked: string | null;
+  /** The cause in a few words, the same for every row it blocks, so the dialog can count them; null when not blocked. */
+  blockedGroup: string | null;
+  /** The folder is already gone. */
+  missing: boolean;
+  /** The full check found every commit in the base branch. */
+  merged: boolean;
+  /** The local branch goes with it when merged branches are deleted. */
+  branchDeletable: boolean;
+  /** Whether the branch is on the remote; null when unknown. */
+  onRemote: boolean | null;
+  pullRequest: { number: number; state: AgentPullRequestState } | null;
   /** Ignored files the removal deletes, listed so the user sees them before ticking. */
   ignored: string[];
   /** Commits a removal leaves only on the branch (which stays) or a recovery ref. */
@@ -270,6 +281,8 @@ export interface WorktreeCleanupApprovalItem {
 export interface WorktreeCleanupApprovalRequest {
   id: string;
   agent: { client: string; workspaceName: string | null };
+  /** The agent's one line (agentReasonLine): the rule the user approved and what it recommends. Plain text. */
+  reason: string | null;
   items: WorktreeCleanupApprovalItem[];
   /** Epoch ms after which the answer is no longer waited for. */
   expiresAt: number;
@@ -300,5 +313,28 @@ export interface WorktreeCleanupAgentResult {
   /** What the removal did per worktree, as the cleanup screen shows it. */
   outcomes?: WorktreeCleanupOutcome[];
   keptBranches?: WorktreeKeptBranch[];
+  /** Asked-for worktrees that could not be removed before the user was asked (in use, unsaved changes...); skipped says why. */
+  blockedBeforeAsking?: number;
   note: string;
+}
+
+// ── The approval dialog ────────────────────────────────────────────────────
+
+export const AGENT_REASON_MAX = 200;
+
+/**
+ * The agent's line as the dialog shows it: plain text on one line, at most
+ * AGENT_REASON_MAX characters, null when empty. Control, zero-width and
+ * direction-changing characters go, so the line cannot break the layout or
+ * make text read in another order than it is stored.
+ */
+export function agentReasonLine(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const line = value
+    .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!line) return null;
+  const chars = Array.from(line);
+  return chars.length > AGENT_REASON_MAX ? `${chars.slice(0, AGENT_REASON_MAX - 1).join("").trimEnd()}…` : line;
 }
