@@ -3934,13 +3934,29 @@ export async function scanProcessesUnderCwd(
 ): Promise<ProcessUseList | null> {
   const found = await scanProcessesUnderCwds([dir], options);
   if (!found) return null;
-  const list: ProcessUseList = [...(found.get(dir) ?? [])];
+  // Those whose folder could not be placed count here as uses too: this
+  // list holds a folder, and before, a deleted folder's text matched it.
+  const placed = found.get(dir) ?? [];
+  const unplaced = (found.cwdUnknown?.get(dir) ?? []).filter((entry) => !placed.some((seen) => seen.pid === entry.pid));
+  const list: ProcessUseList = [...placed, ...unplaced];
   if (found.openFilesUnknown) list.openFilesUnknown = true;
   return list;
 }
 
 export type ProcessUseList = ProcessUse[] & { openFilesUnknown?: boolean };
-export type ProcessScan = Map<string, ProcessUse[]> & { openFilesUnknown?: boolean };
+export type ProcessScan = Map<string, ProcessUse[]> & {
+  openFilesUnknown?: boolean;
+  /**
+   * Linux: the user's own processes whose working directory could not be
+   * placed (unreadable, or a folder deleted since), under each directory
+   * they may be in. Only the worktree cleanup reads it, as a use it cannot
+   * judge: never stopped, and the worktree stays.
+   */
+  cwdUnknown?: Map<string, ProcessUse[]>;
+};
+
+/** A cwd reading: the folders placed, and the user's processes whose folder could not be (with the link text when there was one). */
+export type CwdReading = Map<number, string> & { unknown?: Map<number, string | null> };
 
 /** True when a scan could not say everything that uses the folder: none ran, or its open-file part did not finish. */
 export function processUsageUnknown(scan: { openFilesUnknown?: boolean } | null | undefined): boolean {
@@ -3960,7 +3976,7 @@ export interface ProcessScanOptions {
 export interface ProcessScanReaders {
   platform: NodeJS.Platform;
   list(): Promise<readonly { pid: number; parentPid: number; command: string }[] | null>;
-  cwds(pids: number[]): Promise<Map<number, string> | null>;
+  cwds(pids: number[]): Promise<CwdReading | null>;
   /** Linux: a /proc/<pid>/fd folder's entries, and one entry's target. */
   readdir(path: string): Promise<string[]>;
   readlink(path: string): Promise<string>;
@@ -4071,6 +4087,26 @@ export async function scanProcessesUnderCwds(
       : new Map<number, string[]>();
   const out: ProcessScan = new Map<string, ProcessUse[]>(dirs.map((dir) => [dir, []]));
   if (!open) out.openFilesUnknown = true;
+  if (cwds.unknown?.size) {
+    // Where it may be: under the link's text when there is one (a deleted
+    // folder's text still starts with where it was), anywhere when not.
+    const unknown = new Map<string, ProcessUse[]>();
+    for (const entry of counted) {
+      if (!cwds.unknown.has(entry.pid)) continue;
+      const hint = cwds.unknown.get(entry.pid) ?? null;
+      const under = (dir: string) => {
+        if (hint === null) return true;
+        const rest = hint.slice(dir.length);
+        return hint.startsWith(dir) && (rest === "" || rest.startsWith("/") || rest.startsWith(" "));
+      };
+      for (const dir of dirs.filter(under)) {
+        const list = unknown.get(dir) ?? [];
+        list.push({ pid: entry.pid, command: cleanText(entry.command, 200) });
+        unknown.set(dir, list);
+      }
+    }
+    if (unknown.size) out.cwdUnknown = unknown;
+  }
   for (const entry of counted) {
     const cwd = cwds.get(entry.pid);
     const paths = open?.get(entry.pid) ?? [];
@@ -4082,12 +4118,55 @@ export async function scanProcessesUnderCwds(
   return out;
 }
 
-async function processCwds(pids: number[]): Promise<Map<number, string> | null> {
+function goneError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "ESRCH";
+}
+
+/**
+ * Linux: a process's working directory, placed only when the link's text
+ * names that very folder (same device and inode). A folder deleted since
+ * reads as some text that names nothing, or another folder: unknown, never
+ * matched by its spelling. Null when the process is gone, or is another
+ * user's (its folder is not readable, and it is not Codara's to stop).
+ */
+export async function linuxCwdOf(pid: number): Promise<{ cwd: string } | { unknown: string | null } | null> {
+  const mine = async () => {
+    const uid = process.getuid?.();
+    const owner = await fsp.stat(`/proc/${pid}`).then((info) => info.uid, () => null);
+    return owner !== null && owner === uid;
+  };
+  let text: string;
+  try {
+    text = await readlink(`/proc/${pid}/cwd`);
+  } catch (err) {
+    if (goneError(err)) return null;
+    return (await mine()) ? { unknown: null } : null;
+  }
+  let here: import("node:fs").Stats;
+  try {
+    here = await fsp.stat(`/proc/${pid}/cwd`);
+  } catch (err) {
+    if (goneError(err) && !existsSync(`/proc/${pid}`)) return null;
+    return (await mine()) ? { unknown: text } : null;
+  }
+  const named = await fsp.stat(text).catch(() => null);
+  if (named && named.dev === here.dev && named.ino === here.ino) return { cwd: text };
+  return (await mine()) ? { unknown: text } : null;
+}
+
+async function processCwds(pids: number[]): Promise<CwdReading | null> {
   if (process.platform === "linux") {
-    const entries = await Promise.all(
-      pids.map(async (pid) => [pid, await readlink(`/proc/${pid}/cwd`).catch(() => null)] as const),
-    );
-    return new Map(entries.filter((entry): entry is readonly [number, string] => entry[1] !== null));
+    const read = await Promise.all(pids.map(async (pid) => [pid, await linuxCwdOf(pid).catch(() => null)] as const));
+    const out: CwdReading = new Map();
+    const unknown = new Map<number, string | null>();
+    for (const [pid, entry] of read) {
+      if (!entry) continue;
+      if ("cwd" in entry) out.set(pid, entry.cwd);
+      else unknown.set(pid, entry.unknown);
+    }
+    if (unknown.size) out.unknown = unknown;
+    return out;
   }
   if (process.platform !== "darwin") return null;
   return new Promise((done) => {
