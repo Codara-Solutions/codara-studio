@@ -48,15 +48,26 @@ async function main() {
     assert.equal((await joined).merged[0].url, "second");
     console.log("ok - a caller that timed out leaves the read running and shared");
 
-    // Fresh lists asked for: a failed read is an error, not the old lists.
+    // Fresh lists asked for: a failed read is an error, not the old lists,
+    // and a plain caller joining that read still falls back, whoever came first.
     clock += 2_000;
-    const stale = reader.get("/repo");
-    const fresh = reader.get("/repo", true);
-    assert.equal(pending.length, 3);
-    pending[2].reject(new Error("GitHub is down"));
-    assert.equal((await stale).merged[0].url, "second", "a plain caller may fall back");
-    await assert.rejects(fresh, /GitHub is down/);
-    console.log("ok - a caller that asked for fresh lists gets no old ones");
+    for (const freshFirst of [true, false]) {
+      const before = pending.length;
+      let fresh;
+      let plain;
+      if (freshFirst) {
+        fresh = reader.get("/repo", true);
+        plain = reader.get("/repo");
+      } else {
+        plain = reader.get("/repo");
+        fresh = reader.get("/repo", true);
+      }
+      assert.equal(pending.length, before + 1, "one read, shared");
+      pending[before].reject(new Error("GitHub is down"));
+      await assert.rejects(fresh, /GitHub is down/);
+      assert.equal((await plain).merged[0].url, "second", "a plain caller may fall back");
+    }
+    console.log("ok - a caller that asked for fresh lists gets no old ones, and takes none from the others");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

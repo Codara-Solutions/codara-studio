@@ -32,9 +32,9 @@ export function pullRequestReader(options: {
     }
     return read;
   };
+  // `fresh`: past the cache, and no fallback to it. Others keep both.
   const get = async (root: string, fresh = false): Promise<RepoPullRequests> => {
-    if (fresh) cache.delete(root);
-    const cached = cache.get(root);
+    const cached = fresh ? undefined : cache.get(root);
     if (cached && now() - cached.at < options.ttlMs) return cached.value;
     let timer: NodeJS.Timeout | null = null;
     try {

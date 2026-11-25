@@ -70,10 +70,16 @@ async function fetchPullRequests(root: string): Promise<RepoPullRequests> {
   const { createGitHubCliAdapter } = await import("../github-cli");
   const adapter = (githubAdapter ??= createGitHubCliAdapter());
   const repository = await adapter.resolveRepository(root);
-  const [open, merged] = await Promise.all([
+  // Both settle before the read does: one failing must not free the shared
+  // read while the other still runs (a second caller would start it again).
+  const [openRead, mergedRead] = await Promise.allSettled([
     adapter.listOpenPullRequests ? adapter.listOpenPullRequests(root, repository) : Promise.resolve([]),
     adapter.listMergedPullRequests ? adapter.listMergedPullRequests(root, 100) : Promise.resolve([]),
   ]);
+  if (openRead.status === "rejected") throw openRead.reason;
+  if (mergedRead.status === "rejected") throw mergedRead.reason;
+  const open = openRead.value;
+  const merged = mergedRead.value;
   return {
     open: open.map((pr) => ({
       number: pr.number,
