@@ -587,6 +587,7 @@ export async function usageOf(
   path: string,
   real: string,
   workspaces: readonly Workspace[],
+  options: { folderGone?: boolean } = {},
 ): Promise<WorktreeInUse[]> {
   const { deps } = ctx;
   const uses: WorktreeInUse[] = [];
@@ -606,9 +607,11 @@ export async function usageOf(
   // when its pane's folder is in it, or its shell moved in with cd (seen by
   // the process scan only). It is named as that tab, not counted again
   // among the terminals or processes inside.
-  // With those whose folder could not be placed (Linux): a use all the same.
+  // With those whose folder could not be placed (Linux): a use all the same,
+  // unless the folder is gone already. Then each of them points into a
+  // deleted folder, which no removal can take from them.
   const placed = ctx.processes?.get(real) ?? ctx.processes?.get(path) ?? [];
-  const unplaced = ctx.processes?.cwdUnknown?.get(real) ?? ctx.processes?.cwdUnknown?.get(path) ?? [];
+  const unplaced = options.folderGone ? [] : (ctx.processes?.cwdUnknown?.get(real) ?? ctx.processes?.cwdUnknown?.get(path) ?? []);
   const found = [...placed, ...unplaced.filter((entry) => !placed.some((seen) => seen.pid === entry.pid))];
   let maker: WorktreeInUse | null = null;
   let makerPid: number | null = null;
@@ -949,7 +952,7 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   if (ctx.requireKnownUsage && usageUnknown(ctx.usage)) {
     block(check, "UNCHECKED", "What is running in it could not be read, so it is not removed on its own. Codara tries again later.");
   }
-  const found = await usageOf(ctx.usage, registration.path, real, workspaces);
+  const found = await usageOf(ctx.usage, registration.path, real, workspaces, { folderGone: check.alreadyRemoved });
   const uses = found.filter((use) => countsAsUse(use, ctx));
   if (ctx.allowInUse?.has("process")) {
     const pids = found.flatMap((use) => (use.kind === "process" ? (use.pids ?? []) : []));

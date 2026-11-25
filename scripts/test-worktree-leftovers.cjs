@@ -66,20 +66,29 @@ function fakeSystem() {
       if (system.unreadable.has(pid)) throw new Error("EACCES");
       const entry = procs.get(pid);
       if (!entry) return null;
-      return { ...entry, argv: entry.argv ?? entry.command.split(/\s+/), argvExact: entry.argvExact ?? true, argvKey: entry.argvKey ?? entry.command };
+      return { ...entry, tty: entry.tty ?? null, argv: entry.argv ?? entry.command.split(/\s+/), argvExact: entry.argvExact ?? true, argvKey: entry.argvKey ?? entry.command };
     },
     unreadable: new Set(),
     table: async () => [...procs.values()].map(({ pid, parentPid }) => ({ pid, parentPid })),
     // As the real one: sent only while, at that moment, it has that start and
     // those arguments and works inside the worktree.
-    signal: (pid, signal, expect) => {
+    signalOne: (pid, signal, expect) => {
       const entry = procs.get(pid);
       const inside = (cwd, dir) => typeof cwd === "string" && (cwd === dir || cwd.startsWith(`${dir}/`));
-      if (!entry || entry.start !== expect.start || (entry.argvKey ?? entry.command) !== expect.commandKey || !inside(entry.cwd, expect.real)) return false;
+      if (!entry || entry.start !== expect.start || (entry.argvKey ?? entry.command) !== expect.commandKey || !inside(entry.cwd, expect.real)) {
+        return "it changed since you said yes, so it was not stopped";
+      }
+      if ((entry.tty ?? null) !== expect.tty) return "a terminal was attached to it since you said yes, so it was not stopped";
       signals.push([pid, signal]);
       if (!(entry.unkillable || (signal === "SIGTERM" && entry.ignoresTerm))) procs.delete(pid);
       return true;
     },
+    // One call for all targets, as the real one reads them together.
+    signal: (targets, signal, real) => {
+      system.batches.push(targets.map((target) => target.pid));
+      return new Map(targets.map((target) => [target.pid, system.signalOne(target.pid, signal, { ...target, real })]));
+    },
+    batches: [],
     wait: async (ms) => {
       clock += ms;
     },
@@ -167,8 +176,8 @@ async function main() {
         const { system, procs, signals, add } = fakeSystem();
         add(513, { cwd: W });
         const [entry] = await leftovers.describeLeftovers(system, W, [513], new Map());
-        const send = system.signal;
-        system.signal = (pid, signal, expect) => {
+        const send = system.signalOne;
+        system.signalOne = (pid, signal, expect) => {
           change(procs.get(pid));
           return send(pid, signal, expect);
         };
@@ -190,8 +199,8 @@ async function main() {
       add(512, { cwd: W });
       const [entry] = await leftovers.describeLeftovers(system, W, [512], new Map());
       // Every read before agrees; the start differs only at delivery.
-      const realSignal = system.signal;
-      system.signal = (pid, signal, expect) => {
+      const realSignal = system.signalOne;
+      system.signalOne = (pid, signal, expect) => {
         procs.get(pid).start = "reused";
         return realSignal(pid, signal, expect);
       };
@@ -213,8 +222,8 @@ async function main() {
       const { system, signals, add } = fakeSystem();
       add(540, { cwd: W, ignoresTerm: true });
       const list = await leftovers.describeLeftovers(system, W, [540], new Map());
-      const realSignal = system.signal;
-      system.signal = (pid, signal, expect) => {
+      const realSignal = system.signalOne;
+      system.signalOne = (pid, signal, expect) => {
         const sent = realSignal(pid, signal, expect);
         system.unreadable.add(pid);
         return sent;
@@ -226,8 +235,8 @@ async function main() {
       const second = fakeSystem();
       second.add(542, { cwd: W, ignoresTerm: true });
       const listed = await leftovers.describeLeftovers(second.system, W, [542], new Map());
-      const sendTerm = second.system.signal;
-      second.system.signal = (pid, signal, expect) => {
+      const sendTerm = second.system.signalOne;
+      second.system.signalOne = (pid, signal, expect) => {
         const sent = sendTerm(pid, signal, expect);
         second.procs.get(pid).cwd = null;
         return sent;
@@ -295,26 +304,145 @@ async function main() {
       assert.equal(beside.blocked, undefined, "a process beside Codara is not Codara's");
     });
 
+    await check("outside the panes, a shell or anything with a terminal is named, never offered; a detached orphan is", async () => {
+      const { system, add } = fakeSystem();
+      add(960, { cwd: W, command: "vim notes.md", tty: "34817" });
+      add(961, { cwd: W, command: "/usr/bin/zsh" });
+      add(962, { cwd: W, command: "-bash" });
+      add(963, { cwd: W, command: "node server.js", parentPid: 1 });
+      const list = await leftovers.describeLeftovers(system, W, [960, 961, 962, 963], new Map());
+      const by = Object.fromEntries(list.map((entry) => [entry.pid, entry]));
+      for (const pid of [960, 961, 962]) assert.equal(by[pid].blocked, leftovers.ELSEWHERE, String(pid));
+      assert.equal(by[963].blocked, undefined, "a detached orphan with no terminal is offered");
+    });
+
+    await check("below a pane, at any depth, only what an agent started is offered", async () => {
+      const { system, add } = fakeSystem();
+      system.sessions.add(610);
+      add(610, { cwd: "/home", command: "/bin/zsh -l", parentPid: 100, tty: "34818" });
+      add(611, { cwd: W, command: "npm run dev", parentPid: 610, tty: "34818" });
+      add(612, { cwd: W, command: "node server.js", parentPid: 611, tty: "34818" });
+      // An agent in the chain: offered, though the pane's terminal is attached.
+      add(613, { cwd: "/home", command: "claude", parentPid: 610, tty: "34818" });
+      add(614, { cwd: W, command: "node dev.js", parentPid: 613, tty: "34818" });
+      const panes = new Map([[610, "the tab “shell” in Repo"]]);
+      const list = await leftovers.describeLeftovers(system, W, [612, 614], panes);
+      const by = Object.fromEntries(list.map((entry) => [entry.pid, entry]));
+      assert.equal(by[612].blocked, "it runs in the tab “shell” in Repo. Stop it there first", "a pane grandchild is the user's");
+      assert.equal(by[614].blocked, undefined);
+      assert.equal(by[614].tty, "34818");
+    });
+
+    await check("a terminal attached after the yes stops it, with why", async () => {
+      const { system, procs, signals, add } = fakeSystem();
+      add(970, { cwd: W });
+      const list = await leftovers.describeLeftovers(system, W, [970], new Map());
+      procs.get(970).tty = "34819";
+      const failed = await leftovers.stopLeftovers(system, W, list);
+      assert.deepEqual(signals, []);
+      assert.deepEqual(failed.map(({ why }) => why), ["a terminal was attached to it since you said yes, so it was not stopped"]);
+      // Attached at the signal itself: the system's own re-read refuses too.
+      const second = fakeSystem();
+      second.add(971, { cwd: W });
+      const listed = await leftovers.describeLeftovers(second.system, W, [971], new Map());
+      const send = second.system.signalOne;
+      second.system.signalOne = (pid, signal, expect) => {
+        second.procs.get(pid).tty = "34820";
+        return send(pid, signal, expect);
+      };
+      const late = await leftovers.stopLeftovers(second.system, W, listed);
+      assert.deepEqual(second.signals, []);
+      assert.match(late[0].why, /terminal was attached/);
+    });
+
+    await check("all are re-read in one call at the signal, and one that did not answer in time is named, not signalled", async () => {
+      const { system, signals, add } = fakeSystem();
+      add(980, { cwd: W });
+      add(981, { cwd: W });
+      const list = await leftovers.describeLeftovers(system, W, [980, 981], new Map());
+      system.signalOne = () => "the system did not answer in time, so it was not stopped";
+      const failed = await leftovers.stopLeftovers(system, W, list);
+      assert.deepEqual(signals, []);
+      assert.deepEqual(system.batches[0], [980, 981], "one read for both");
+      assert.deepEqual(failed.map(({ entry, why }) => [entry.pid, why]), [
+        [980, "the system did not answer in time, so it was not stopped"],
+        [981, "the system did not answer in time, so it was not stopped"],
+      ]);
+    });
+
+    await check("macOS re-reads every pid with one ps and one lsof, each cut short", async () => {
+      const calls = [];
+      const target = (pid, extra = {}) => ({ pid, start: "Mon Nov 24 10:00:00 2026", commandKey: leftovers.argvKeyOf(`node s${pid}.js`), tty: null, ...extra });
+      const exec = (file, args) => {
+        calls.push([file, args]);
+        if (file === "ps") {
+          return {
+            timedOut: false,
+            stdout: [
+              "  990 ??       Mon Nov 24 10:00:00 2026 node s990.js",
+              "  991 ttys003  Mon Nov 24 10:00:00 2026 node s991.js",
+              "  992 ??       Mon Nov 24 10:00:00 2026 node s992.js",
+            ].join("\n"),
+          };
+        }
+        return { timedOut: false, stdout: ["p990", "fcwd", `n${W}/app`, "p991", "fcwd", `n${W}`, "p992", "fcwd", "n/work/tree-2"].join("\n") };
+      };
+      const verdicts = leftovers.macSameNow([target(990), target(991), target(992)], W, exec);
+      assert.deepEqual(calls.map(([file, args]) => [file, args[args.indexOf("-p") + 1]]), [["ps", "990,991,992"], ["/usr/sbin/lsof", "990,991,992"]]);
+      assert.equal(verdicts.get(990), true);
+      assert.match(verdicts.get(991), /terminal was attached/);
+      assert.match(verdicts.get(992), /changed since you said yes/, "a sibling folder is not inside");
+      const slow = leftovers.macSameNow([target(990)], W, () => ({ timedOut: true, stdout: "" }));
+      assert.equal(slow.get(990), "the system did not answer in time, so it was not stopped");
+      assert.equal(leftovers.SIGNAL_READ_TIMEOUT_MS <= 500, true);
+    });
+
+    await check("a sibling whose name only starts like the worktree is not inside it", async () => {
+      const { system, add } = fakeSystem();
+      add(985, { cwd: "/work/tree-2" });
+      add(986, { cwd: "/work/tree 2" });
+      const list = await leftovers.describeLeftovers(system, W, [985, 986], new Map());
+      assert.deepEqual(list.map((entry) => entry.blocked), ["it only has a file open in it. Close that file first", "it only has a file open in it. Close that file first"]);
+    });
+
     await check("the scan keeps a folder it cannot place as unknown where its text points, and holds nothing with no text", async () => {
+      const T = path.join(scratch, "work", "tree");
+      fs.mkdirSync(T, { recursive: true });
       const readers = {
         platform: "linux",
         list: async () => [
           { pid: 771, parentPid: 1, command: "node server.js" },
           { pid: 772, parentPid: 1, command: "ssh-agent" },
+          { pid: 773, parentPid: 1, command: "node sibling.js" },
+          { pid: 774, parentPid: 1, command: "node gone.js" },
         ],
-        cwds: async () => Object.assign(new Map(), { unknown: new Map([[771, "/work/tree/sub (deleted)"], [772, null]]) }),
+        cwds: async () =>
+          Object.assign(new Map(), {
+            unknown: new Map([
+              [771, `${T}/sub (deleted)`],
+              [772, null],
+              // Siblings whose names only start the same are not inside.
+              [773, `${T} 2`],
+              [774, `${T}-2 (deleted)`],
+            ]),
+          }),
         readdir: async () => [],
         readlink: async () => {
           throw new Error("EACCES");
         },
       };
-      const scan = await agent.scanProcessesUnderCwds(["/work/tree", "/work/other"], { appPid: 0x3ffffe, sessionPids: [], readers });
-      assert.deepEqual(scan.get("/work/tree"), [], "never placed inside by its text");
-      assert.deepEqual(scan.cwdUnknown.get("/work/tree").map((use) => use.pid), [771]);
+      const scan = await agent.scanProcessesUnderCwds([T, "/work/other"], { appPid: 0x3ffffe, sessionPids: [], readers });
+      assert.deepEqual(scan.get(T), [], "never placed inside by its text");
+      assert.deepEqual(scan.cwdUnknown.get(T).map((use) => use.pid), [771]);
       assert.equal(scan.cwdUnknown.has("/work/other"), false);
+      const siblings = await agent.scanProcessesUnderCwds([T], { appPid: 0x3ffffe, sessionPids: [], readers });
+      assert.deepEqual(siblings.cwdUnknown.get(T).map((use) => use.pid), [771], "not /work/tree 2 nor /work/tree-2");
       assert.deepEqual(scan.cwdUnreadable.map((use) => use.pid), [772]);
-      const one = await agent.scanProcessesUnderCwd("/work/tree", { appPid: 0x3ffffe, sessionPids: [], readers });
+      const one = await agent.scanProcessesUnderCwd(T, { appPid: 0x3ffffe, sessionPids: [], readers });
       assert.deepEqual(one.map((use) => use.pid), [771], "the agent tools' check counts it as a use");
+      fs.rmdirSync(T);
+      const gone = await agent.scanProcessesUnderCwd(T, { appPid: 0x3ffffe, sessionPids: [], readers });
+      assert.deepEqual(gone.map((use) => use.pid), [], "not once the folder is gone");
     });
 
     // ── Clean up from the rail ──────────────────────────────────────────
@@ -474,7 +602,7 @@ async function main() {
       try {
         const result = await click("unplaced");
         assert.equal(result.status, "refused");
-        assert.equal(result.message, "node server.js (pid 6363) runs in it, and its folder cannot be read.");
+        assert.equal(result.message, "node server.js (pid 6363) runs in it, and its folder cannot be read. Stop it yourself, then Clean up again.");
         assert.equal(fake.signals.length, signalled);
         assert.equal(fs.existsSync(unplaced), true);
       } finally {
@@ -514,6 +642,53 @@ async function main() {
       assert.match(pane.message, /node server\.js \(pid 7070\) runs in it, and it runs in a terminal tab\. Stop it there first\./);
       assert.equal(fake.signals.length, signals);
       assert.equal(fs.existsSync(dirty), true);
+    });
+
+    await check("a row whose folder is gone is cleaned (or, unattended, left as on main) though a process points into the deleted folder", async () => {
+      for (const mode of ["manual", "auto-merged"]) {
+        const id = `vanished-${mode}`;
+        const dir = merged(id);
+        fs.rmSync(dir, { recursive: true, force: true });
+        // The scan cannot place it: its link reads "<dir> (deleted)".
+        fake.add(6464, { cwd: null, command: "node server.js" });
+        const original = deps.processesUnderCwds;
+        deps.processesUnderCwds = async (dirs) =>
+          Object.assign(await original(dirs), { cwdUnknown: new Map(dirs.map((entry) => [entry, [{ pid: 6464, command: "node server.js" }]])) });
+        const signalled = fake.signals.length;
+        try {
+          const result =
+            mode === "manual"
+              ? await click(id)
+              : await rail.cleanUpRailWorkspace(deps, { workspaceId: id, mode }, { autoRemoveMerged: { enabled: true, minUptimeMs: 0 } });
+          if (mode === "manual") {
+            assert.equal(result.status, "removed", `${mode}: ${result.message}`);
+            assert.equal(has(id), false);
+          } else {
+            // As on main: the unattended mode leaves a gone folder to a click, and says so, not "in use".
+            assert.equal(result.message, "The folder is gone.");
+          }
+          assert.equal(fake.signals.length, signalled, "nothing is signalled for a gone folder");
+        } finally {
+          deps.processesUnderCwds = original;
+          fake.procs.delete(6464);
+        }
+      }
+    });
+
+    await check("a row READY at the check that gained a process before the click asks again and stops nothing", async () => {
+      const late = merged("late");
+      assert.equal((await click("late", { preview: true })).code, "READY");
+      fake.add(6565, { cwd: late, command: "node late.js" });
+      const signalled = fake.signals.length;
+      // The fold's yes to a READY row carries no fingerprint.
+      const again = await click("late", {});
+      assert.equal(again.status, "confirm");
+      assert.equal(again.code, "CONFIRM_STOP");
+      assert.deepEqual(again.processes.map((entry) => entry.program), ["node late.js"]);
+      assert.equal(fake.signals.length, signalled);
+      assert.equal(fs.existsSync(late), true);
+      const done = await click("late", { confirmStop: again.stopFingerprint });
+      assert.equal(done.status, "removed", done.message);
     });
 
     await check("on its own, it stops nothing: whatever runs in it waits for a click", async () => {
@@ -569,9 +744,12 @@ async function main() {
         assert.equal(list[0].blocked, undefined);
         // Read again at the signal itself: another start, other arguments or
         // another folder sends nothing.
-        const bound = { start: list[0].start, commandKey: list[0].commandKey, real: dir };
-        for (const wrong of [{ start: "not-its-start" }, { commandKey: "not-its-arguments" }, { real: path.join(scratch, "elsewhere") }]) {
-          assert.equal(real.signal(child.pid, "SIGTERM", { ...bound, ...wrong }), false, JSON.stringify(wrong));
+        const bound = { pid: child.pid, start: list[0].start, commandKey: list[0].commandKey, tty: list[0].tty, real: dir };
+        assert.equal(bound.tty, null, "a detached child has no terminal");
+        for (const wrong of [{ start: "not-its-start" }, { commandKey: "not-its-arguments" }, { real: path.join(scratch, "elsewhere") }, { tty: "34816" }]) {
+          const { real: where, ...target } = { ...bound, ...wrong };
+          const verdict = real.signal([target], "SIGTERM", where).get(child.pid);
+          assert.equal(typeof verdict, "string", JSON.stringify(wrong));
         }
         await new Promise((done) => setTimeout(done, 100));
         assert.equal(child.exitCode, null);
@@ -581,6 +759,73 @@ async function main() {
         await exited;
         child = null;
       });
+
+      await check("a worktree reached through a symlink: by the link's text nothing is signalled, with why", async () => {
+        const dir = fs.mkdtempSync(path.join(scratch, "target-"));
+        const link = path.join(scratch, `link-${path.basename(dir)}`);
+        fs.symlinkSync(dir, link);
+        const script = path.join(scratch, "server.js");
+        child = spawn(process.execPath, [script], { cwd: link, detached: true, stdio: "ignore" });
+        await new Promise((done) => setTimeout(done, 300));
+        const [entry] = await leftovers.describeLeftovers(real, link, [child.pid], new Map());
+        assert.equal(entry.blocked, "it only has a file open in it. Close that file first");
+        const target = { pid: child.pid, start: entry.start, commandKey: entry.commandKey, tty: entry.tty };
+        assert.equal(typeof real.signal([target], "SIGTERM", link).get(child.pid), "string");
+        await new Promise((done) => setTimeout(done, 100));
+        assert.equal(child.exitCode, null, "still running");
+        // Codara reads the worktree's real path first (canonicalPath): there it is offered.
+        const [placed] = await leftovers.describeLeftovers(real, fs.realpathSync(link), [child.pid], new Map());
+        assert.equal(placed.blocked, undefined);
+        const exited = new Promise((done) => child.once("exit", done));
+        process.kill(child.pid, "SIGKILL");
+        await exited;
+        child = null;
+      });
+
+      if (process.platform === "linux" && fs.existsSync("/bin/script")) {
+        await check("a real process with a terminal attached and no pane above it is named, never offered", async () => {
+          const dir = fs.mkdtempSync(path.join(scratch, "tty-"));
+          const script = path.join(scratch, "server.js");
+          // script(1) gives its child a terminal of its own, as a terminal app does.
+          child = spawn("/bin/script", ["-qfec", `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`, "/dev/null"], {
+            cwd: dir,
+            detached: true,
+            stdio: ["pipe", "ignore", "ignore"],
+          });
+          let inner = null;
+          try {
+            for (let tries = 0; tries < 50 && !inner; tries += 1) {
+              await new Promise((done) => setTimeout(done, 100));
+              const kids = fs.readFileSync(`/proc/${child.pid}/task/${child.pid}/children`, "utf8").trim().split(/\s+/).filter(Boolean);
+              inner = kids.length ? Number(kids[0]) : null;
+            }
+            assert.ok(inner, "the terminal's child started");
+            const facts = await real.facts(inner);
+            assert.notEqual(facts.tty, null, "tty_nr is read from /proc/<pid>/stat");
+            const [entry] = await leftovers.describeLeftovers(real, dir, [inner], new Map());
+            assert.equal(entry.blocked, leftovers.ELSEWHERE);
+            const target = { pid: inner, start: entry.start, commandKey: entry.commandKey, tty: null };
+            assert.match(real.signal([target], "SIGTERM", dir).get(inner), /terminal was attached/, "the terminal is read again at the signal");
+            assert.equal(fs.existsSync(`/proc/${inner}`), true, "not signalled");
+          } finally {
+            if (inner) {
+              try {
+                process.kill(inner, "SIGKILL");
+              } catch {
+                /* already gone */
+              }
+            }
+            const exited = new Promise((done) => (child.exitCode !== null || child.signalCode !== null ? done() : child.once("exit", done)));
+            try {
+              process.kill(child.pid, "SIGKILL");
+            } catch {
+              /* already gone */
+            }
+            await exited;
+            child = null;
+          }
+        });
+      }
 
       if (process.platform === "linux") {
         await check("a process whose folder was deleted is unknown, never inside a look-alike", async () => {
@@ -595,7 +840,7 @@ async function main() {
           const facts = await real.facts(child.pid);
           assert.equal(facts.cwd, null, "unknown, not the look-alike");
           const [entry] = await leftovers.describeLeftovers(real, lookalike, [child.pid], new Map());
-          assert.equal(entry.blocked, "its folder cannot be read");
+          assert.equal(entry.blocked, "its folder cannot be read. Stop it yourself, then Clean up again");
           const scan = await agent.scanProcessesUnderCwds([lookalike], { appPid: 0x3ffffe, sessionPids: [] });
           assert.equal(scan.get(lookalike).some((use) => use.pid === child.pid), false, "not placed inside");
           assert.equal(scan.cwdUnknown?.get(lookalike)?.some((use) => use.pid === child.pid), true, "kept as unknown");
