@@ -111,6 +111,11 @@ export function commandRunsAgent(command: string, runtime: AgentHibernationRunti
   return (name === "node" || name === "bun") && PACKAGE_PATHS[runtime].test(normalized);
 }
 
+/** A process that may be agy itself: an agy path segment, not a shell that names it. */
+function mayBeAgy(command: string): boolean {
+  return MAYBE_AGY_RE.test(command) && !isShellProcess(command);
+}
+
 function isHelperProcess(command: string): boolean {
   return HELPER_NAME_RE.test(executableName(command));
 }
@@ -170,8 +175,9 @@ export function classifyPaneProcessTree(
     return { ok: false, reason: "process-list-unavailable", detail: "pane shell not listed" };
   }
   // An agy that replaced the pane's shell (`exec agy`) is not the one the
-  // proof would read: the search below starts under the root.
-  if (runtime === "antigravity" && commandRunsAgent(byPid.get(rootPid)!.command, runtime)) {
+  // proof would read: the search below starts under the root. A shell that
+  // only typed it (`zsh -ic agy`) is fine.
+  if (runtime === "antigravity" && mayBeAgy(byPid.get(rootPid)!.command)) {
     return { ok: false, reason: "other-processes", detail: "agy is the pane's own process" };
   }
 
@@ -224,13 +230,15 @@ export function classifyPaneProcessTree(
 
   const agentStart = agent.startMs;
   for (const entry of tree) {
-    if (entry.pid === agent.pid || chain.has(entry.pid)) continue;
+    if (entry.pid === agent.pid) continue;
     // Antigravity's proof (antigravity-presence.ts) is read off one agy
     // process: a second one would be stopped unchecked, whenever it started.
-    // MAYBE_AGY_RE: unquoted spaces in its path too; a false match only keeps a pane awake.
-    if (runtime === "antigravity" && MAYBE_AGY_RE.test(entry.command)) {
+    // MAYBE_AGY_RE: unquoted spaces in its path too; a false match only keeps
+    // a pane awake. In the launcher chain, the shells that typed it may name it.
+    if (runtime === "antigravity" && (chain.has(entry.pid) ? mayBeAgy(entry.command) : MAYBE_AGY_RE.test(entry.command))) {
       return { ok: false, reason: "other-processes", detail: `second agy ${describeProcess(entry, agentStart)}` };
     }
+    if (chain.has(entry.pid)) continue;
     if (underAgent.has(entry.pid)) {
       if (isToolShell(entry.command)) {
         return { ok: false, reason: "other-processes", detail: `tool shell ${describeProcess(entry, agentStart)}` };

@@ -83,10 +83,13 @@ export async function requestAgentSleep(input: {
     .catch(() => null);
   if (!result) return { ok: false, reason: "stop-failed", runtime: session.runtime };
   if (!result.ok) return { ok: false, reason: result.reason, runtime: session.runtime };
-  // Only a sleep main accepted changes the pane's pointer: a refused one
-  // leaves the live pane's restore pointer as it was. A Resume pressed
-  // before this lands wakes from the id main kept with the sleep.
-  if (adopt) input.adoptSession?.(session);
+  // Only a sleep main accepted changes the pane's pointer, and to the
+  // conversation main proved (its answer may be another request's, the
+  // timer's): a refused one leaves the live pane's restore pointer as it
+  // was. A Resume pressed before this lands wakes from the id main kept.
+  if (session.runtime === "antigravity" && result.conversationId && result.conversationId !== input.session.sessionId) {
+    input.adoptSession?.({ ...session, sessionId: result.conversationId });
+  }
   return {
     ok: true,
     hibernation: {

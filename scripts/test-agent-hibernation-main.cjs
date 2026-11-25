@@ -290,6 +290,7 @@ async function main() {
             },
             activity: () => t.state.activity,
           });
+        t.deps.antigravityActivity = (id) => presence.antigravityActivityVerdict(id, () => t.state.finalActivity ?? t.state.activity);
         mutate?.(t);
       },
       request({ runtime: "antigravity", conversationId: "conv-1", ...extra }),
@@ -297,6 +298,7 @@ async function main() {
   r = await agyRun();
   check("an idle agy holding the pane's conversation sleeps", r.result.ok === true && r.calls.stop.length === 1, r.result);
   check("it reads the open conversation off the agy process the census found", r.calls.openPid === 101, r.calls);
+  check("the answer names the conversation main proved", r.result.conversationId === "conv-1", r.result);
   r = await agyRun(undefined, { session: { runtime: "antigravity", sessionId: "continue", cwd: "/w" } });
   H.live = new Set();
   H.placed = new Set(["pane-1"]);
@@ -343,6 +345,28 @@ async function main() {
       "other-processes",
       "the pane's processes changed while agy was checked",
     ],
+    [
+      "a pid of the pane reused by another program while agy was checked",
+      (t) => {
+        const checked = t.deps.antigravity;
+        t.deps.antigravity = async (...args) => {
+          const verdict = await checked(...args);
+          t.state.processes = t.state.processes.map((p) => (p.pid === 102 ? { ...p, startMs: p.startMs + 1, command: "node /srv/other.js" } : p));
+          return verdict;
+        };
+      },
+      {},
+      "other-processes",
+      "the pane's processes changed while agy was checked",
+    ],
+    [
+      "a subagent turning busy during the re-census",
+      (t) => (t.state.finalActivity = { known: true, busy: "subagent" }),
+      {},
+      "agent-busy",
+      "a subagent is working",
+    ],
+    ["no last look at agy's flags", (t) => delete t.deps.antigravityActivity, {}, "conversation-unknown", "agy could not be checked"],
     ["no way to check agy at all", (t) => delete t.deps.antigravity, {}, "conversation-unknown", "agy could not be checked"],
   ];
   for (const [name, mutate, extra, reason, detail] of agyRefusals) {

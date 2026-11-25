@@ -184,7 +184,9 @@ export type AgentHibernationResult =
   // (Windows: working sets; Linux: anonymous and shared proportional set
   // sizes, not the page cache; macOS: RSS);
   // null only when it could not be read for every one of them.
-  | { ok: true; sleptAt: number; summary: AgentSleepSummary | null; freedBytes: number | null }
+  // conversationId: Antigravity only, the conversation main proved and keeps
+  // with the sleep (a caller whose request it answered may have named another).
+  | { ok: true; sleptAt: number; summary: AgentSleepSummary | null; freedBytes: number | null; conversationId?: string }
   | { ok: false; reason: AgentHibernationRefusal; detail?: string };
 
 /**

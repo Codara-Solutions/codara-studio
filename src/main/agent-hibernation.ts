@@ -28,7 +28,12 @@
 // Every verdict lands in <codaraHome>/logs/main.log once per change.
 
 import { latestSessionStart } from "./agent-session-registry";
-import { antigravitySleepVerdict, isAntigravityConversationId, type AntigravitySleepVerdict } from "./antigravity-presence";
+import {
+  antigravityActivityVerdict,
+  antigravitySleepVerdict,
+  isAntigravityConversationId,
+  type AntigravitySleepVerdict,
+} from "./antigravity-presence";
 import { currentAntigravityConversations } from "./session-search/antigravity-summaries";
 import { describeSleepingAgent } from "./agent-sleep-summary";
 import { E2E_BACKGROUND } from "./e2e-background";
@@ -134,6 +139,9 @@ export interface AgentHibernationDeps {
   // Antigravity: may the agy process the census found be stopped for the
   // pane to reopen `conversationId`? (antigravity-presence.ts)
   antigravity?: (agentPid: number, agentCommand: string, conversationId: string | undefined) => Promise<AntigravitySleepVerdict>;
+  // Antigravity: agy's busy flags for the conversation, read synchronously
+  // as the last thing before the stop.
+  antigravityActivity?: (conversationId: string) => AntigravitySleepVerdict;
 }
 
 // e2e only: the suite cannot wait half an hour. Honored only when the app
@@ -287,6 +295,7 @@ const defaultDeps: AgentHibernationDeps = {
   sleepOutput: (paneId) => pty.sleepOutput(paneId, MAX_SLEEPING_OUTPUT_BYTES),
   describe: describePane,
   antigravity: (agentPid, agentCommand, conversationId) => antigravitySleepVerdict(agentPid, agentCommand, conversationId),
+  antigravityActivity: (conversationId) => antigravityActivityVerdict(conversationId),
 };
 
 // The decision running for each pane. A timer's request that finds one is
@@ -747,15 +756,28 @@ async function decide(
     // the ones the census passed, with the agy it read, and no other agy.
     const again = await deps.listProcesses();
     const recount = again ? classifyPaneProcessTree(again, first.session.pid, request.runtime, { terminalPids }) : null;
-    const passed = new Set(census.pids);
+    // Same processes: pid, start and command, so a pid reused by another
+    // program does not pass.
+    const identity = (list: readonly CensusProcess[], pids: readonly number[]) => {
+      const byPid = new Map(list.map((entry) => [entry.pid, entry]));
+      return pids
+        .map((pid) => `${pid}|${byPid.get(pid)?.startMs ?? "?"}|${byPid.get(pid)?.command ?? "?"}`)
+        .sort()
+        .join("\n");
+    };
     if (
+      !again ||
       !recount?.ok ||
       recount.agentPid !== census.agentPid ||
-      recount.pids.length !== passed.size ||
-      recount.pids.some((pid) => !passed.has(pid))
+      identity(again, recount.pids) !== identity(processes, census.pids)
     ) {
       return { ok: false, reason: "other-processes", detail: "the pane's processes changed while agy was checked" };
     }
+    // agy's flags again, after the last await: a turn or a subagent that
+    // started during the re-census is seen here or after the stop.
+    const still = deps.antigravityActivity?.(request.conversationId ?? "") ?? null;
+    if (!still) return { ok: false, reason: "conversation-unknown", detail: "agy could not be checked" };
+    if (!still.ok) return { ok: false, reason: still.reason, detail: still.detail };
   }
 
   // The listing took time. Judge again from fresh state, and fence the stop
@@ -808,7 +830,13 @@ async function decide(
   entry.summary = await withTimeout(described, SUMMARY_TIMEOUT_MS, null);
   // Where the line came from, never the line: it is the user's content.
   return {
-    result: { ok: true, sleptAt, summary: entry.summary, freedBytes: entry.freedBytes },
+    result: {
+      ok: true,
+      sleptAt,
+      summary: entry.summary,
+      freedBytes: entry.freedBytes,
+      ...(request.runtime === "antigravity" && request.conversationId ? { conversationId: request.conversationId } : {}),
+    },
     context: `${context.replace(/\)$/, "")}, freed ${formatMb(entry.freedBytes)}, card ${entry.summary?.source ?? "none"})`,
   };
 }

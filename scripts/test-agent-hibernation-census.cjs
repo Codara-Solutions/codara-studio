@@ -226,6 +226,20 @@ async function main() {
     "antigravity",
   );
   check("an agy that replaced the pane's shell keeps the pane awake", !verdict.ok && verdict.reason === "other-processes", verdict);
+  verdict = classifyPaneProcessTree(
+    [proc(700, 1, -2_000, "/opt/Agent Tools/agy"), proc(708, 700, 0, "/home/u/.local/bin/agy")],
+    700,
+    "antigravity",
+  );
+  check("an agy under a path with spaces as the pane's process keeps it awake", !verdict.ok && verdict.reason === "other-processes", verdict);
+  verdict = classifyPaneProcessTree(
+    [agyShell, proc(709, 700, -1_000, "/opt/Agent Tools/agy --continue"), proc(710, 709, 0, "/home/u/.local/bin/agy")],
+    700,
+    "antigravity",
+  );
+  check("an agy under a path with spaces in the launcher chain keeps it awake", !verdict.ok && verdict.reason === "other-processes", verdict);
+  verdict = classifyPaneProcessTree([agyShell, proc(711, 700, -1_000, "bash -c agy --continue"), proc(712, 711, 0, "/home/u/.local/bin/agy")], 700, "antigravity");
+  check("a shell in the launcher chain that names agy is fine", verdict.ok === true && verdict.agentPid === 712, verdict);
   verdict = classifyPaneProcessTree([agyShell, proc(704, 700, 0, "node /home/u/tools/agy.js")], 700, "antigravity");
   check("a pane running only something named like agy has no agent", !verdict.ok && verdict.reason === "no-agent-process", verdict);
 

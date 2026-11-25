@@ -10,7 +10,7 @@
 // shown is a refusal: a wrong stop costs the user a turn or a subagent.
 
 import { execFile } from "node:child_process";
-import { readdir, readlink } from "node:fs/promises";
+import { readdir, readlink, realpath } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -79,15 +79,23 @@ export async function linuxOpenFilePaths(pid: number, fs: ProcFs = { readdir, re
     }
     return out;
   };
+  // Listed, read, listed, read, listed: the same numbers each time and the
+  // same targets both times, so a descriptor opened, or closed and its
+  // number reused, anywhere in the scan shows.
+  const sameList = async (): Promise<boolean | "gone"> => {
+    const again = await fs.readdir(dir).catch((error) => (gone(error) ? null : undefined));
+    // The process may have exited mid-read: it holds nothing.
+    if (again === null) return "gone";
+    return again !== undefined && again.length === fds.length && fds.every((fd) => again.includes(fd));
+  };
   const paths = await readAll();
-  // Read twice, numbers and targets: a descriptor closed and its number
-  // reused for another file meanwhile shows as a changed target.
-  const again = await fs.readdir(dir).catch((error) => (gone(error) ? null : undefined));
-  // The process may have exited mid-read: it holds nothing.
-  if (again === null) return [];
-  if (paths === null || again === undefined || again.length !== fds.length || fds.some((fd) => !again.includes(fd))) return null;
+  const middle = await sameList();
+  if (middle === "gone") return [];
+  if (paths === null || !middle) return null;
   const second = await readAll();
-  if (second === null || second.some((path, i) => path !== paths[i])) return null;
+  const last = await sameList();
+  if (last === "gone") return [];
+  if (second === null || !last || second.some((path, i) => path !== paths[i])) return null;
   return paths;
 }
 
@@ -113,10 +121,14 @@ async function openFilePaths(pid: number, platform: NodeJS.Platform): Promise<st
 export async function antigravityOpenConversations(
   pid: number,
   platform: NodeJS.Platform = process.platform,
-  presenceDir: string = join(antigravityCliDir(), "presence"),
+  presenceDir?: string,
 ): Promise<string[] | null> {
+  // The OS names open files by their real path: a presence folder reached
+  // through a link must be compared as its target. Unresolvable: unknown.
+  const dir = presenceDir ?? (await realpath(join(antigravityCliDir(), "presence")).catch(() => null));
+  if (!dir) return null;
   const paths = await openFilePaths(pid, platform);
-  return paths ? presenceIdsFromPaths(paths, presenceDir) : null;
+  return paths ? presenceIdsFromPaths(paths, dir) : null;
 }
 
 export type AntigravitySleepVerdict = { ok: true } | { ok: false; reason: AgentHibernationRefusal; detail: string };
@@ -153,6 +165,15 @@ export function judgeAntigravitySleep(
 }
 
 /** agy's own view of one conversation; undefined when the database cannot be read. */
+/** agy's flags alone, as a sleep verdict: the last check before the stop. */
+export function antigravityActivityVerdict(
+  conversationId: string,
+  activityOf: (id: string) => AntigravityConversationActivity | null | undefined = currentConversationActivity,
+): AntigravitySleepVerdict {
+  if (!isAntigravityConversationId(conversationId)) return judgeAntigravitySleep(conversationId, null, undefined);
+  return judgeAntigravitySleep(conversationId, [conversationId], activityOf(conversationId));
+}
+
 export function currentConversationActivity(conversationId: string): AntigravityConversationActivity | null | undefined {
   try {
     return readAntigravityConversationActivity(join(antigravityCliDir(), ANTIGRAVITY_SUMMARY_DB), conversationId);

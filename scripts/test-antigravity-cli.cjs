@@ -204,6 +204,40 @@ async function main() {
       readlink: async (p) => (p.endsWith("/1") ? (pass++ < 1 ? "/dev/null" : lock("b")) : lock("a")),
     };
     assert.equal(await presence.linuxOpenFilePaths(9, reused), null, "a descriptor number reused for a second lock: no proof");
+    assert.equal(
+      await presence.linuxOpenFilePaths(9, procFs([["0"], ["0"], ["0", "1"]], { 0: lock("a"), 1: lock("b") })),
+      null,
+      "a lock opened after the second listing: no proof",
+    );
+    assert.equal(
+      await presence.linuxOpenFilePaths(9, procFs([["0"], ["0", "1"], ["0"]], { 0: lock("a"), 1: lock("b") })),
+      null,
+      "a lock held for part of the scan: no proof",
+    );
+    if (process.platform === "linux") {
+      // A presence folder reached through a link: the OS names the lock by
+      // its real path, so the folder is compared as its target.
+      const realHome = process.env.HOME;
+      const home = path.join(dir, "home-linked");
+      const store = path.join(dir, "agy-store", "presence");
+      fs.mkdirSync(store, { recursive: true });
+      fs.mkdirSync(path.join(home, ".gemini", "antigravity-cli"), { recursive: true });
+      fs.symlinkSync(store, path.join(home, ".gemini", "antigravity-cli", "presence"));
+      // A quiet child holds the lock (this process opens files as it scans).
+      const held = fs.openSync(path.join(store, "conv-linked.lock"), "w");
+      const holder = require("node:child_process").spawn("sleep", ["30"], { stdio: ["ignore", held, "ignore"] });
+      fs.closeSync(held);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        process.env.HOME = home;
+        assert.deepEqual(await presence.antigravityOpenConversations(holder.pid, "linux"), ["conv-linked"], "a lock behind a linked folder was missed");
+        process.env.HOME = path.join(dir, "home-empty");
+        assert.equal(await presence.antigravityOpenConversations(holder.pid, "linux"), null, "no presence folder is unknown, not none");
+      } finally {
+        process.env.HOME = realHome;
+        holder.kill();
+      }
+    }
     await assert.rejects(presence.linuxOpenFilePaths(9, procFs(["denied"], {})), "an unreadable fd folder is not an empty one");
     for (const [command, looked] of [
       ["/opt/Agent Tools/agy --conversation c1", true],
@@ -225,6 +259,10 @@ async function main() {
       assert.equal(verdict.detail, "no conversation id");
     }
 
+    // The last check before the stop: agy's flags alone.
+    assert.deepEqual(presence.antigravityActivityVerdict("conv-x", () => ({ known: true, busy: null })), { ok: true });
+    assert.equal(presence.antigravityActivityVerdict("conv-x", () => ({ known: true, busy: "subagent" })).detail, "a subagent is working");
+    assert.equal(presence.antigravityActivityVerdict("continue", () => ({ known: true, busy: null })).ok, false);
     // Wake: a conversation agy no longer lists is not free to reopen.
     assert.equal(await presence.antigravityConversationHeld("conv-x", () => ({ known: false, busy: null })), "missing");
     assert.equal(await presence.antigravityConversationHeld("conv-x", () => ({ known: true, busy: "subagent" })), true);
