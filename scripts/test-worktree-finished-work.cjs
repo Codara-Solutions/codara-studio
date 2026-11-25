@@ -584,13 +584,12 @@ async function main() {
       const dir = path.join(scratch, "links");
       fs.mkdirSync(dir, { recursive: true });
       fs.symlinkSync("../gone/node_modules", path.join(dir, "node_modules"));
-      const inode = fs.lstatSync(path.join(dir, "node_modules")).ino;
       const released = await links.prepareWorktreeRemoval(dir, ["node_modules"]);
       assert.equal(!!fs.lstatSync(path.join(dir, "node_modules"), { throwIfNoEntry: false }), false);
       assert.ok(released[0].held && !released[0].held.startsWith(dir + path.sep), "held outside the worktree");
       await links.restoreWorktreeLinks(dir, released);
       assert.equal(fs.readlinkSync(path.join(dir, "node_modules")), "../gone/node_modules");
-      assert.equal(fs.lstatSync(path.join(dir, "node_modules")).ino, inode, "the very same entry");
+      assert.ok(fs.lstatSync(path.join(dir, "node_modules")).isSymbolicLink(), "a link again");
       assert.equal(fs.existsSync(path.dirname(released[0].held)), false, "nothing left beside it");
       // Once the worktree is gone, only the held link goes.
       const again = await links.prepareWorktreeRemoval(dir, ["node_modules"]);

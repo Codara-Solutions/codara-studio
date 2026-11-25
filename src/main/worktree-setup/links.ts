@@ -156,27 +156,42 @@ export async function removeLinkEntry(absolute: string): Promise<boolean> {
 
 /**
  * Moves an entry to `to` only when nothing is there, without the gap a
- * check before a rename leaves: a hard link of the entry itself (never what
- * it points at) fails on anything at `to`, then the old name goes. Where
- * the disk has no hard links (Windows junctions, some file systems), a
- * rename after a last look. False when it stayed where it was.
+ * check before a rename leaves: a link is made again with the text it
+ * reads (symlink never replaces anything; link() would follow it on
+ * macOS), a file is hard-linked, then the old name goes. A folder or a
+ * Windows junction has no such call: a rename after a last look. False
+ * when it stayed where it was.
  */
 export async function moveNoReplace(from: string, to: string): Promise<boolean> {
-  try {
-    await fsp.link(from, to);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException)?.code;
-    if (code === "EEXIST" || code === "ENOENT") return false;
-    if ((await fsp.lstat(to).catch(() => null)) !== null) return false;
+  const info = await fsp.lstat(from).catch(() => null);
+  if (!info) return false;
+  if (info.isSymbolicLink() && process.platform !== "win32") {
+    const text = await fsp.readlink(from).catch(() => null);
+    if (text === null) return false;
     try {
-      await fsp.rename(from, to);
-      return true;
+      await fsp.symlink(text, to);
     } catch {
       return false;
     }
+    await fsp.unlink(from).catch(() => undefined);
+    return true;
   }
-  await fsp.unlink(from).catch(() => undefined);
-  return true;
+  if (info.isFile()) {
+    try {
+      await fsp.link(from, to);
+      await fsp.unlink(from).catch(() => undefined);
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === "EEXIST") return false;
+    }
+  }
+  if ((await fsp.lstat(to).catch(() => null)) !== null) return false;
+  try {
+    await fsp.rename(from, to);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
