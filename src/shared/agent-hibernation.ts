@@ -1,5 +1,6 @@
 // Agent hibernation: shared policy for stopping finished, untouched agent
-// terminals (Claude Code, Codex, Grok, Pi) to give their memory back, and
+// terminals (Claude Code, Codex, Grok, Pi, Antigravity) to give their memory
+// back, and
 // resuming them when the user asks for it (the pane's Resume button, Enter in
 // the pane, or the Agents view).
 //
@@ -8,7 +9,7 @@
 // rule here fails closed: when the evidence is missing or unclear the agent
 // stays awake, because a sleeping pane must never cost the user any work.
 
-export type AgentHibernationRuntime = "claude" | "codex" | "grok" | "pi";
+export type AgentHibernationRuntime = "claude" | "codex" | "grok" | "pi" | "antigravity";
 
 // Quick picks shown next to the minutes field in Settings. Any whole number
 // of minutes from 0 (off) to AGENT_HIBERNATION_MAX_MINUTES is valid.
@@ -55,8 +56,16 @@ export function normalizeAgentHibernationWorkspaces(value: unknown): Record<stri
   return out;
 }
 
+/**
+ * A command with an agy path segment, the listing's unquoted spaces and all
+ * (`/opt/Agent Tools/agy --continue`). Wide on purpose: it picks processes
+ * that might be agy, where a false match only costs a look or keeps a pane
+ * awake.
+ */
+export const MAYBE_AGY_RE = /(?:^|[\s/\\])agy(?:\.exe)?(?=\s|$)/i;
+
 export function isAgentHibernationRuntime(value: unknown): value is AgentHibernationRuntime {
-  return value === "claude" || value === "codex" || value === "grok" || value === "pi";
+  return value === "claude" || value === "codex" || value === "grok" || value === "pi" || value === "antigravity";
 }
 
 // Where the pane was when the renderer asked: for the log only, main judges
@@ -81,6 +90,10 @@ export interface AgentHibernationRequest {
   // the layout on disk has no pointer, and a reloaded window would otherwise
   // have nothing to resume the agent with.
   session?: AgentSleepingSession;
+  // Antigravity only: the conversation the pane reopens on waking. agy has
+  // no transcript Codara reads, so main checks this id against the one the
+  // agy process holds open and against agy's own busy flag before the stop.
+  conversationId?: string;
 }
 
 /** A session pointer in the renderer's own shape; main never reads its fields. */
@@ -92,6 +105,9 @@ export type AgentHibernationRefusal =
   | "bad-request"
   | "in-flight"
   | "no-session"
+  // Antigravity: which conversation the agy process has open, or whether it
+  // is the pane's, could not be shown.
+  | "conversation-unknown"
   // The pane's process restarted between the two looks at it.
   | "respawned"
   | "remote"
@@ -168,7 +184,9 @@ export type AgentHibernationResult =
   // (Windows: working sets; Linux: anonymous and shared proportional set
   // sizes, not the page cache; macOS: RSS);
   // null only when it could not be read for every one of them.
-  | { ok: true; sleptAt: number; summary: AgentSleepSummary | null; freedBytes: number | null }
+  // conversationId: Antigravity only, the conversation main proved and keeps
+  // with the sleep (a caller whose request it answered may have named another).
+  | { ok: true; sleptAt: number; summary: AgentSleepSummary | null; freedBytes: number | null; conversationId?: string }
   | { ok: false; reason: AgentHibernationRefusal; detail?: string };
 
 /**
@@ -372,6 +390,7 @@ const RUNTIME_NAMES: Record<AgentHibernationRuntime, string> = {
   codex: "Codex",
   grok: "Grok",
   pi: "Pi",
+  antigravity: "Antigravity",
 };
 
 /**
@@ -426,6 +445,8 @@ export function sleepNowRefusalMessage(reason: AgentHibernationRefusal | "cannot
       return "Another agent is running in this terminal now.";
     case "cannot-resume":
       return "Codara could not confirm this session can be resumed, so it keeps running.";
+    case "conversation-unknown":
+      return `Codara cannot tell which ${name} conversation this is, so it keeps running.`;
     case "in-flight":
       return "It is already being put to sleep.";
     case "stop-failed":

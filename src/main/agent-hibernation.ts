@@ -20,11 +20,21 @@
 //     (Claude Code's status line) and does not count; the settle does;
 //   - the pane's process tree is only the shell, the agent and what the agent
 //     started at boot (agent-hibernation-census.ts), so no dev server, watcher
-//     or tool command can be caught in the stop.
+//     or tool command can be caught in the stop;
+//   - Antigravity only: the agy process holds exactly the conversation the
+//     pane will reopen, and agy marks neither it nor a subagent under it as
+//     working (antigravity-presence.ts). agy's screen alone proves too little.
 // Anything unclear refuses. The renderer simply asks again on its next tick.
 // Every verdict lands in <codaraHome>/logs/main.log once per change.
 
 import { latestSessionStart } from "./agent-session-registry";
+import {
+  antigravityActivityVerdict,
+  antigravitySleepVerdict,
+  isAntigravityConversationId,
+  type AntigravitySleepVerdict,
+} from "./antigravity-presence";
+import { currentAntigravityConversations } from "./session-search/antigravity-summaries";
 import { describeSleepingAgent } from "./agent-sleep-summary";
 import { E2E_BACKGROUND } from "./e2e-background";
 import { logMain } from "./file-log";
@@ -124,7 +134,21 @@ export interface AgentHibernationDeps {
     paneId: string,
     runtime: AgentHibernationRequest["runtime"],
     probedTranscriptPath: string | null,
+    conversationId?: string | null,
   ) => Promise<AgentSleepSummary | null>;
+  // Antigravity: may the agy process the census found be stopped for the
+  // pane to reopen `conversationId`? (antigravity-presence.ts)
+  // otherPids: every other process the stop would end, none of which may
+  // hold an agy conversation.
+  antigravity?: (
+    agentPid: number,
+    agentCommand: string,
+    conversationId: string | undefined,
+    otherPids: readonly number[],
+  ) => Promise<AntigravitySleepVerdict>;
+  // Antigravity: agy's busy flags for the conversation, read synchronously
+  // as the last thing before the stop.
+  antigravityActivity?: (conversationId: string) => AntigravitySleepVerdict;
 }
 
 // e2e only: the suite cannot wait half an hour. Honored only when the app
@@ -212,10 +236,16 @@ async function paneAgentNote(paneId: string): Promise<string | null> {
   }
 }
 
+function antigravityConversationTitle(conversationId: string | null | undefined): string | null {
+  if (!conversationId) return null;
+  return currentAntigravityConversations()?.find((item) => item.id === conversationId)?.title || null;
+}
+
 function describePane(
   paneId: string,
   runtime: AgentHibernationRequest["runtime"],
   probedTranscriptPath: string | null,
+  conversationId?: string | null,
 ): Promise<AgentSleepSummary | null> {
   // Read now, before the stop: the notifier forgets the session's last prompt
   // once the agent is gone.
@@ -231,6 +261,7 @@ function describePane(
       notifierPrompt: activity?.prompt ?? null,
       agentNote,
       tabTitle: activity?.tabTitle ?? null,
+      conversationTitle: runtime === "antigravity" ? antigravityConversationTitle(conversationId) : null,
     }),
   );
 }
@@ -270,6 +301,9 @@ const defaultDeps: AgentHibernationDeps = {
   watchedOnPhone: (paneId) => studioPaneWatchedFromPhone(paneId),
   sleepOutput: (paneId) => pty.sleepOutput(paneId, MAX_SLEEPING_OUTPUT_BYTES),
   describe: describePane,
+  antigravity: (agentPid, agentCommand, conversationId, otherPids) =>
+    antigravitySleepVerdict(agentPid, agentCommand, conversationId, undefined, otherPids),
+  antigravityActivity: (conversationId) => antigravityActivityVerdict(conversationId),
 };
 
 // The decision running for each pane. A timer's request that finds one is
@@ -489,6 +523,7 @@ function validRequest(input: unknown): AgentHibernationRequest | null {
       ? value.transcriptPath
       : undefined;
   const session = validSleepingSession(value.session);
+  const conversationId = isAntigravityConversationId(value.conversationId) ? value.conversationId : undefined;
   return {
     paneId: value.paneId,
     runtime: value.runtime,
@@ -496,6 +531,7 @@ function validRequest(input: unknown): AgentHibernationRequest | null {
     ...(value.manual === true ? { manual: true } : {}),
     ...(transcriptPath ? { transcriptPath } : {}),
     ...(session ? { session } : {}),
+    ...(conversationId ? { conversationId } : {}),
   };
 }
 
@@ -509,6 +545,11 @@ function judgeNow(request: AgentHibernationRequest, deps: AgentHibernationDeps, 
   if (session.remote || !(session.pid > 0)) return { ok: false, result: { ok: false, reason: "remote" } };
   if (deps.watchedOnPhone?.(request.paneId)) {
     return { ok: false, result: { ok: false, reason: "watched-on-phone" } };
+  }
+  // Without the id, waking would run `agy --continue`, which reopens agy's
+  // latest conversation, not necessarily this pane's.
+  if (request.runtime === "antigravity" && !request.conversationId) {
+    return { ok: false, result: { ok: false, reason: "conversation-unknown", detail: "no conversation id" } };
   }
   const evidence = deps.evidence(request.paneId);
   const stateRefusal = judgeAgentEvidence(evidence, request.runtime);
@@ -708,6 +749,52 @@ async function decide(
     census.memoryBytes ??
     (deps.treeMemory ? await withTimeout(deps.treeMemory(census.pids).catch(() => null), TREE_MEMORY_TIMEOUT_MS, null) : null);
 
+  // agy's own word that nothing runs in the conversation, read last before
+  // the re-check: its subagents live inside the agy process, where the
+  // census cannot see them. Never held like a census refusal: the flag
+  // changes as soon as the work ends.
+  if (request.runtime === "antigravity") {
+    const agentCommand = processes.find((entry) => entry.pid === census.agentPid)?.command ?? "";
+    const verdict = deps.antigravity
+      ? await deps.antigravity(census.agentPid, agentCommand, request.conversationId, census.pids).catch(() => null)
+      : null;
+    if (!verdict) return { ok: false, reason: "conversation-unknown", detail: "agy could not be checked" };
+    if (!verdict.ok) return { ok: false, reason: verdict.reason, detail: verdict.detail };
+    // The proof took time: the processes the stop will end must still be
+    // the ones the census passed, with the agy it read, and no other agy.
+    const again = await deps.listProcesses();
+    const recount = again ? classifyPaneProcessTree(again, first.session.pid, request.runtime, { terminalPids }) : null;
+    // Same processes: pid, start and command, so a pid reused by another
+    // program does not pass.
+    const identity = (list: readonly CensusProcess[], pids: readonly number[]) => {
+      const byPid = new Map(list.map((entry) => [entry.pid, entry]));
+      return pids
+        .map((pid) => `${pid}|${byPid.get(pid)?.startMs ?? "?"}|${byPid.get(pid)?.command ?? "?"}`)
+        .sort()
+        .join("\n");
+    };
+    if (
+      !again ||
+      !recount?.ok ||
+      recount.agentPid !== census.agentPid ||
+      identity(again, recount.pids) !== identity(processes, census.pids)
+    ) {
+      return { ok: false, reason: "other-processes", detail: "the pane's processes changed while agy was checked" };
+    }
+    // agy may have moved to another conversation during the re-census: the
+    // open conversation and flags again, for the same process.
+    const recheck = deps.antigravity
+      ? await deps.antigravity(census.agentPid, agentCommand, request.conversationId, census.pids).catch(() => null)
+      : null;
+    if (!recheck) return { ok: false, reason: "conversation-unknown", detail: "agy could not be checked" };
+    if (!recheck.ok) return { ok: false, reason: recheck.reason, detail: recheck.detail };
+    // agy's flags again, after the last await: a turn or a subagent that
+    // started during the re-check is seen here or after the stop.
+    const still = deps.antigravityActivity?.(request.conversationId ?? "") ?? null;
+    if (!still) return { ok: false, reason: "conversation-unknown", detail: "agy could not be checked" };
+    if (!still.ok) return { ok: false, reason: still.reason, detail: still.detail };
+  }
+
   // The listing took time. Judge again from fresh state, and fence the stop
   // on the exact process generation that was judged. From here to the stop
   // runs in one tick: a prompt sent meanwhile (a session message, Cora, the
@@ -736,14 +823,19 @@ async function decide(
     unsent: kept?.unsent ?? null,
     summary: null,
     freedBytes,
-    session: request.session ?? null,
+    // Antigravity wakes the conversation proved held above, whatever the
+    // renderer's pointer said (useTerminalSession reads it back on wake).
+    session:
+      request.runtime === "antigravity" && request.conversationId
+        ? { ...(request.session ?? {}), runtime: "antigravity", sessionId: request.conversationId }
+        : (request.session ?? null),
     placementGraceUntil: 0,
     offExit: null,
   };
   sleeping.set(request.paneId, entry);
   forgetAtNextExit(request.paneId, entry);
   const described = deps.describe
-    ? deps.describe(request.paneId, request.runtime, request.transcriptPath ?? null).catch(() => null)
+    ? deps.describe(request.paneId, request.runtime, request.transcriptPath ?? null, request.conversationId ?? null).catch(() => null)
     : Promise.resolve(null);
   const stopped = await deps.stop(request.paneId, first.session.generationId);
   if (!stopped) {
@@ -753,7 +845,13 @@ async function decide(
   entry.summary = await withTimeout(described, SUMMARY_TIMEOUT_MS, null);
   // Where the line came from, never the line: it is the user's content.
   return {
-    result: { ok: true, sleptAt, summary: entry.summary, freedBytes: entry.freedBytes },
+    result: {
+      ok: true,
+      sleptAt,
+      summary: entry.summary,
+      freedBytes: entry.freedBytes,
+      ...(request.runtime === "antigravity" && request.conversationId ? { conversationId: request.conversationId } : {}),
+    },
     context: `${context.replace(/\)$/, "")}, freed ${formatMb(entry.freedBytes)}, card ${entry.summary?.source ?? "none"})`,
   };
 }
@@ -768,6 +866,9 @@ export function registerAgentHibernationIpc(handle: IpcHandle): void {
       : null,
   );
   handle("agentHibernation:restoredAsleep", (_event, input: unknown) => registerRestoredAsleep(input));
+  handle("agentHibernation:sleepingSession", (_event, paneId: unknown) =>
+    typeof paneId === "string" && paneId.length > 0 && paneId.length <= 256 ? (sleepingEntry(paneId)?.session ?? null) : null,
+  );
 }
 
 /** The renderer's fire-and-forget channels (touches and its own skips). */

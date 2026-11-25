@@ -1645,9 +1645,9 @@ export function terminalAgentHibernationEvidence(paneId: string): AgentHibernati
     excluded: w.excluded,
     disposing: w.disposing,
     attached: w.attached,
-    // Antigravity panes never sleep: waking one would run `agy --continue`,
-    // which reopens agy's latest conversation, not necessarily this pane's.
-    runtime: w.runtime === "antigravity" ? null : w.runtime,
+    // Antigravity's screen is all the notifier has of agy: hibernation adds
+    // agy's own busy flag and open conversation (antigravity-presence.ts).
+    runtime: w.runtime,
     state: w.state,
     chipState: w.lastEmittedState,
     turnActive: turnActive(w),

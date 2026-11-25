@@ -12,7 +12,7 @@
 
 import { useEffect, useMemo, useRef } from "react";
 import { anyAgentHibernation, policyIdleMs } from "@shared/agent-hibernation";
-import type { Tab, TerminalLeafHibernation } from "../tabs/types";
+import type { Tab, TerminalAgentSession, TerminalLeafHibernation } from "../tabs/types";
 import type { WorkspaceTerminalLayout } from "../tabs/useTabs";
 import {
   focusedTerminalPaneId,
@@ -32,6 +32,8 @@ interface Input {
   // Mark a pane asleep, keeping what its pane already put on the mark (a
   // Resume pressed as the stop landed).
   markPaneAsleep: (paneId: string, hibernation: TerminalLeafHibernation) => void;
+  // A pane's session pointer, wherever the pane is (requestAgentSleep's adoptSession).
+  setPaneAgentSession: (paneId: string, session: TerminalAgentSession) => void;
 }
 
 const FIRST_SWEEP_MS = 15_000;
@@ -83,6 +85,7 @@ export function useAgentHibernation(input: Input): void {
         session: candidate.session,
         placement: candidate.placement,
         stillWanted: () => stillCandidate(candidate),
+        adoptSession: (session) => latestRef.current.setPaneAgentSession(candidate.paneId, session),
       });
       if (!outcome) return;
       if (!outcome.ok) {

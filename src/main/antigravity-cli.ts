@@ -5,8 +5,9 @@
 // runs agy itself. Of agy's own files it reads one table, read only: the
 // conversation list in conversation_summaries.db, which the session picker
 // offers, marks as open where agy says it is not fully idle, and the restore
-// guard checks (session-search/antigravity-summaries.ts).
-// Nothing else.
+// guard checks (session-search/antigravity-summaries.ts). For agent
+// hibernation it also reads which conversation an agy process holds open
+// (the names of its open files, antigravity-presence.ts). Nothing else.
 
 import { dirname } from "node:path";
 
@@ -14,6 +15,7 @@ import { runtimeFromProcessCommand } from "../shared/agent-patterns";
 import { isSafeSessionId } from "../shared/session-search";
 import { findBinaryOutsideNpm } from "./binary-resolver";
 import type { IpcHandle } from "./ipc";
+import { antigravityConversationHeld, antigravityOpenConversations, isAntigravityConversationId } from "./antigravity-presence";
 import { descendantProcessesWithCommands } from "./owned-process-tree";
 import { sessionPid } from "./pty-manager";
 import {
@@ -56,6 +58,24 @@ export async function antigravityRunsInPane(paneId: string): Promise<boolean> {
   if (rootPid === null) return false;
   const below = await descendantProcessesWithCommands(rootPid, 500).catch(() => null);
   return below?.some((proc) => runtimeFromProcessCommand(proc.command) === "antigravity") ?? false;
+}
+
+/**
+ * The conversation the one agy process under the pane's shell has open, for
+ * a pane whose pointer names none yet (`agy`, `agy --continue`). Null when
+ * there is not exactly one agy holding exactly one conversation.
+ */
+export async function antigravityPaneConversation(
+  paneId: string,
+  openConversations: (pid: number) => Promise<string[] | null> = (pid) => antigravityOpenConversations(pid),
+): Promise<string | null> {
+  const rootPid = sessionPid(paneId);
+  if (rootPid === null) return null;
+  const below = await descendantProcessesWithCommands(rootPid, 0).catch(() => null);
+  const agy = below?.filter((proc) => runtimeFromProcessCommand(proc.command) === "antigravity") ?? [];
+  if (agy.length !== 1) return null;
+  const open = await openConversations(agy[0].pid).catch(() => null);
+  return open && open.length === 1 ? open[0] : null;
 }
 
 // `agy --continue` reopens agy's latest conversation, and agy does not say
@@ -117,5 +137,11 @@ export function registerAntigravityIpc(handle: IpcHandle): void {
   handle("antigravity:status", (_e, fresh: unknown) => antigravityStatus(fresh === true));
   handle("antigravity:runs-in-pane", (_e, paneId: unknown) =>
     typeof paneId === "string" ? antigravityRunsInPane(paneId) : false,
+  );
+  handle("antigravity:pane-conversation", (_e, paneId: unknown) =>
+    typeof paneId === "string" && paneId.length > 0 ? antigravityPaneConversation(paneId) : null,
+  );
+  handle("antigravity:conversation-held", (_e, conversationId: unknown) =>
+    isAntigravityConversationId(conversationId) ? antigravityConversationHeld(conversationId) : null,
   );
 }

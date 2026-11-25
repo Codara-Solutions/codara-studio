@@ -1,8 +1,9 @@
 // One line about what a sleeping agent session was doing, for the card its
 // pane shows (agent hibernation). Read once, when the agent is stopped, from
 // what Codara already has: the session's transcript (the user's /rename, the
-// title Claude Code gives a session, the prompts), the note the agent posted
-// on the workspace rail, the notifier's view of the last prompt, and the tab.
+// title Claude Code gives a session, the prompts), the title agy keeps in its
+// conversation list, the note the agent posted on the workspace rail, the
+// notifier's view of the last prompt, and the tab.
 //
 // The transcript is read with the session index's own line parsers, so every
 // CLI's records mean here what they mean in session search. The text is the
@@ -40,7 +41,7 @@ export async function readTranscriptFacts(
   runtime: AgentHibernationRuntime,
   limits: { fullReadMaxBytes?: number; headBytes?: number; tailBytes?: number } = {},
 ): Promise<TranscriptFacts | null> {
-  if (!path || !/\.jsonl$/i.test(path)) return null;
+  if (!path || !/\.jsonl$/i.test(path) || runtime === "antigravity") return null;
   let size: number;
   try {
     const stat = await fs.stat(path);
@@ -95,6 +96,9 @@ export interface SleepSummaryInput {
   notifierPrompt: string | null;
   agentNote: string | null;
   tabTitle: string | null;
+  // Antigravity has no transcript Codara reads: the title agy gave the
+  // conversation in its own list (session-search/antigravity-summaries.ts).
+  conversationTitle?: string | null;
 }
 
 export interface SleepSummaryDeps {
@@ -110,7 +114,7 @@ function clean(text: string | null | undefined, max: number): string | null {
 }
 
 // Tab titles Codara gives on its own say nothing about the session.
-const GENERIC_TAB_TITLE_RE = /^(?:terminals?|shell|pwsh|powershell|bash|zsh|cmd|claude(?: code)?|codex|grok|pi)$/i;
+const GENERIC_TAB_TITLE_RE = /^(?:terminals?|shell|pwsh|powershell|bash|zsh|cmd|claude(?: code)?|codex|grok|pi|antigravity|agy)$/i;
 
 /**
  * The card's line: the user's name for the session, the title the agent gave
@@ -126,7 +130,7 @@ export async function describeSleepingAgent(
   const tab = clean(input.tabTitle, AGENT_SLEEP_TITLE_MAX);
   const candidates: Array<[string | null, AgentSleepSummary["source"]]> = [
     [clean(facts?.customTitle, AGENT_SLEEP_TITLE_MAX), "custom-title"],
-    [clean(facts?.aiTitle, AGENT_SLEEP_TITLE_MAX), "ai-title"],
+    [clean(facts?.aiTitle ?? input.conversationTitle, AGENT_SLEEP_TITLE_MAX), "ai-title"],
     [clean(input.agentNote, AGENT_SLEEP_TITLE_MAX), "agent-note"],
     [latestPrompt ? clean(latestPrompt, AGENT_SLEEP_TITLE_MAX) : null, "prompt"],
     [clean(facts?.firstPrompt, AGENT_SLEEP_TITLE_MAX), "first-prompt"],

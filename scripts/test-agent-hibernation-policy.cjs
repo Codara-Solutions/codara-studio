@@ -358,7 +358,7 @@ async function main() {
   check("a pane that was running at quit still restores eagerly", running.bootResume === true && !("hibernation" in running), running);
   for (const [name, bad] of [
     ["a string", "asleep"],
-    ["an unknown agent", { runtime: "antigravity", sleptAt: 5 }],
+    ["an unknown agent", { runtime: "aider", sleptAt: 5 }],
     ["no time", { runtime: "claude" }],
     ["a time that is not a number", { runtime: "claude", sleptAt: "5" }],
     ["another agent than the session's", { runtime: "codex", sleptAt: 5 }],

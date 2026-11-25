@@ -1595,6 +1595,10 @@ export interface UseTabsApi {
     paneId: string,
     next: (current: TerminalLeafHibernation | null) => TerminalLeafHibernation | null,
   ) => void;
+  // A pane's session pointer, wherever it lives (setLeafAgentSession reaches
+  // the visible workspace only): an Antigravity pane going to sleep names
+  // the conversation its agy holds open.
+  setPaneAgentSession: (paneId: string, session: TerminalAgentSession) => void;
   // The pane's "Keep running" pin: agent hibernation never stops a pinned pane.
   setLeafKeepAwake: (tabId: TabId, paneId: string, keepAwake: boolean) => void;
   // Rename a leaf's paneId. The caller must dispose the old PTY when it is
@@ -3492,17 +3496,17 @@ export function useTabs(
     [],
   );
 
-  const updatePaneHibernation = useCallback(
-    (paneId: string, next: (current: TerminalLeafHibernation | null) => TerminalLeafHibernation | null) => {
+  const updatePaneLeaf = useCallback(
+    <K extends "hibernation" | "agentSession">(paneId: string, key: K, next: (leaf: TerminalLeaf) => TerminalLeaf[K]) => {
       const updateTabs = (currentTabs: Tab[]): Tab[] => {
         let changed = false;
         const nextTabs = currentTabs.map((tab) => {
           if (tab.kind !== "terminal") return tab;
           const leaf = findLeaf(tab.root, paneId);
           if (!leaf) return tab;
-          const hibernation = next(leaf.hibernation ?? null);
-          if ((leaf.hibernation ?? null) === hibernation) return tab;
-          const root = setLeafField(tab.root, paneId, "hibernation", hibernation);
+          const value = next(leaf);
+          if ((leaf[key] ?? null) === (value ?? null)) return tab;
+          const root = setLeafField(tab.root, paneId, key, value);
           if (root === tab.root) return tab;
           changed = true;
           return { ...tab, root };
@@ -3531,6 +3535,17 @@ export function useTabs(
       }
     },
     [],
+  );
+
+  const updatePaneHibernation = useCallback(
+    (paneId: string, next: (current: TerminalLeafHibernation | null) => TerminalLeafHibernation | null) =>
+      updatePaneLeaf(paneId, "hibernation", (leaf) => next(leaf.hibernation ?? null)),
+    [updatePaneLeaf],
+  );
+
+  const setPaneAgentSession = useCallback(
+    (paneId: string, session: TerminalAgentSession) => updatePaneLeaf(paneId, "agentSession", () => session),
+    [updatePaneLeaf],
   );
 
   const setPaneHibernation = useCallback(
@@ -4652,6 +4667,7 @@ export function useTabs(
       setPaneHibernation,
       patchPaneHibernation,
       updatePaneHibernation,
+      setPaneAgentSession,
       setLeafKeepAwake,
       renameLeaf,
       addPaneInTab,

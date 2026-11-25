@@ -62,6 +62,7 @@ import {
   PI_LAUNCH_COMMAND,
 } from "../../workers/launch-commands";
 import { antigravityConversationsNamedElsewhere } from "../../workers/antigravity-panes";
+import { antigravityWakeRefusal } from "../../workers/session-resume";
 import type { TerminalAgentSession, TerminalLeafHibernation } from "../../tabs/types";
 import { isAgentHibernationRuntime, isSleepResumeKey } from "@shared/agent-hibernation";
 import { isSafeSessionId } from "@shared/session-search";
@@ -3422,6 +3423,34 @@ export function useTerminalSession({
               agentSessionRef.current = healed;
               onResumeFallbackRef.current?.(healed);
             }
+          }
+          if (session?.runtime === "antigravity") {
+            // The pointer main kept with the sleep is the one its checks
+            // proved; the leaf's can lag it (Sleep now as the user switched
+            // workspaces), and waking another conversation is never right.
+            const kept = (await window.spark.agentHibernation?.sleepingSession?.(sessionId).catch(() => null)) as
+              | Partial<TerminalAgentSession>
+              | null
+              | undefined;
+            if (disposed) return;
+            if (kept?.runtime === "antigravity" && typeof kept.sessionId === "string" && kept.sessionId !== session.sessionId) {
+              logRestore(`pane=${sessionId} wakes with the Antigravity conversation main kept with the sleep`);
+              session = { ...session, sessionId: kept.sessionId };
+              agentSessionRef.current = session;
+              onResumeFallbackRef.current?.(session);
+            }
+            // Two agy processes must never write one conversation: one opened
+            // it meanwhile (another tab, a terminal outside Codara) keeps the
+            // pane asleep, and so does a pointer that names no conversation,
+            // which would reopen agy's latest instead.
+            const conversationId = session.sessionId;
+            const held =
+              conversationId && conversationId !== ANTIGRAVITY_CONTINUE_SESSION_ID
+                ? ((await window.spark.antigravity?.conversationHeld(conversationId).catch(() => null)) ?? null)
+                : null;
+            if (disposed) return;
+            const refusal = antigravityWakeRefusal(conversationId, antigravityConversationsNamedElsewhere(sessionId), held);
+            if (refusal) throw new Error(refusal);
           }
           const plan = session ? await computeResumePlan(session, sessionId) : null;
           if (disposed) return;

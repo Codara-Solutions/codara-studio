@@ -14,6 +14,7 @@ const RUNTIME_NAME: Record<TerminalLeafHibernation["runtime"], string> = {
   codex: "Codex",
   grok: "Grok",
   pi: "Pi",
+  antigravity: "Antigravity",
 };
 
 export const RESUME_TITLE = "Resume. Shift+click: resume and never let it sleep on its own";
