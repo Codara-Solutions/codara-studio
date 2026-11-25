@@ -295,6 +295,28 @@ async function main() {
       assert.equal(beside.blocked, undefined, "a process beside Codara is not Codara's");
     });
 
+    await check("the scan keeps a folder it cannot place as unknown where its text points, and holds nothing with no text", async () => {
+      const readers = {
+        platform: "linux",
+        list: async () => [
+          { pid: 771, parentPid: 1, command: "node server.js" },
+          { pid: 772, parentPid: 1, command: "ssh-agent" },
+        ],
+        cwds: async () => Object.assign(new Map(), { unknown: new Map([[771, "/work/tree/sub (deleted)"], [772, null]]) }),
+        readdir: async () => [],
+        readlink: async () => {
+          throw new Error("EACCES");
+        },
+      };
+      const scan = await agent.scanProcessesUnderCwds(["/work/tree", "/work/other"], { appPid: 0x3ffffe, sessionPids: [], readers });
+      assert.deepEqual(scan.get("/work/tree"), [], "never placed inside by its text");
+      assert.deepEqual(scan.cwdUnknown.get("/work/tree").map((use) => use.pid), [771]);
+      assert.equal(scan.cwdUnknown.has("/work/other"), false);
+      assert.deepEqual(scan.cwdUnreadable.map((use) => use.pid), [772]);
+      const one = await agent.scanProcessesUnderCwd("/work/tree", { appPid: 0x3ffffe, sessionPids: [], readers });
+      assert.deepEqual(one.map((use) => use.pid), [771], "the agent tools' check counts it as a use");
+    });
+
     // ── Clean up from the rail ──────────────────────────────────────────
     const origin = path.join(scratch, "origin.git");
     const repo = path.join(scratch, "repo");
