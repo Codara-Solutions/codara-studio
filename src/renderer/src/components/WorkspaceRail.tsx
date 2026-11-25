@@ -2721,7 +2721,7 @@ function WorkspaceRow({
                 <PullRequestMark entry={prWatch} />
               </span>
             </span>
-            {missing ? (
+            {missing && !removing ? (
               <span data-testid="workspace-missing" className="rail-child-line2" style={{ color: "var(--muted)" }}>
                 Folder gone
               </span>

@@ -37,6 +37,7 @@ import type { AgentCleanupDeps, ApprovalAsker } from "./agent-tool";
 import { pruneWorktreeArchive, worktreeArchiveRoot } from "./archive";
 import type { RepoPullRequests, WorktreeCleanupDeps } from "./inspect";
 import { systemLeftovers } from "./leftovers";
+import { pullRequestReader } from "./pull-request-reads";
 import type { AutoRemoveMergedOptions } from "./rail";
 import type { ScannedWorktree } from "./scan";
 import type { SizeMeasurer, SizeStore } from "./space";
@@ -46,7 +47,7 @@ const PULL_REQUEST_TIMEOUT_MS = 10_000;
 
 let audit: ReturnType<typeof createWorktreeAuditLog> | null = null;
 let githubAdapter: import("../github-cli").GitHubCliAdapter | null = null;
-const pullRequestCache = new Map<string, { at: number; value: RepoPullRequests }>();
+const pullRequestLists = pullRequestReader({ fetch: fetchPullRequests, ttlMs: PULL_REQUEST_TTL_MS, timeoutMs: PULL_REQUEST_TIMEOUT_MS });
 
 let space: typeof import("./space") | null = null;
 let store: SizeStore | null = null;
@@ -86,41 +87,8 @@ async function fetchPullRequests(root: string): Promise<RepoPullRequests> {
   };
 }
 
-// Asks running now, per repository: the fold checks its rows all at once,
-// and they share one call to GitHub.
-const pullRequestsAsked = new Map<string, Promise<RepoPullRequests>>();
-
-// Cached per repository. A failed refresh answers with the last known lists,
-// so a removal judges merges by the same facts its confirm step showed.
 function pullRequests(root: string): Promise<RepoPullRequests> {
-  const cached = pullRequestCache.get(root);
-  if (cached && Date.now() - cached.at < PULL_REQUEST_TTL_MS) return Promise.resolve(cached.value);
-  let asked = pullRequestsAsked.get(root);
-  if (!asked) {
-    asked = refreshPullRequests(root).finally(() => pullRequestsAsked.delete(root));
-    pullRequestsAsked.set(root, asked);
-  }
-  return asked;
-}
-
-async function refreshPullRequests(root: string): Promise<RepoPullRequests> {
-  const cached = pullRequestCache.get(root);
-  let timer: NodeJS.Timeout | null = null;
-  try {
-    const value = await Promise.race([
-      fetchPullRequests(root),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("GitHub did not answer in time")), PULL_REQUEST_TIMEOUT_MS);
-      }),
-    ]);
-    pullRequestCache.set(root, { at: Date.now(), value });
-    return value;
-  } catch (err) {
-    if (cached) return cached.value;
-    throw err;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  return pullRequestLists.get(root);
 }
 
 function deps(invalidateGitCache: (cwd: string) => void): WorktreeCleanupDeps {
@@ -355,8 +323,7 @@ async function agentDeps(): Promise<AgentCleanupDeps> {
       }
     },
     freshPullRequests: async (root) => {
-      pullRequestCache.delete(root);
-      return pullRequests(root);
+      return pullRequestLists.get(root, true);
     },
     closedPullRequests: async (root) => {
       const { createGitHubCliAdapter } = await import("../github-cli");
