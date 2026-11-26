@@ -2,10 +2,9 @@
 // test-runner: heavy (launches Chromium through Playwright)
 "use strict";
 
-// Modal dialogs read over a busy terminal. Glass dialogs take the shared read
-// tier (.spark-glass--strong.spark-overlay-surface); their scrim must be a
-// sibling, since a scrim wrapper's fade-in makes it a backdrop root and the
-// frost then blurs only the empty scrim. The worktree clean-up dialogs (the
+// Modal dialogs read over a busy terminal. For glass dialogs this checks only
+// that their scrim is a sibling: a scrim wrapper's fade-in makes it a backdrop
+// root, and the frost then blurs only the empty scrim. The worktree clean-up dialogs (the
 // agent's "Remove worktrees?", Clean up worktrees, and the rail's Clean up
 // confirm) ask what to delete, and even the read tier let the terminal show
 // through, so they sit on the solid reading surface (.fb-solid). This holds:
@@ -396,11 +395,15 @@ async function main() {
       { id: "codara-classic", mode: "dark" },
       { id: "codara-daylight", mode: "light" },
     ]) {
-      for (const viewport of [
-        { width: 1280, height: 800 },
-        { width: 720, height: 800 },
+      // Glass off is checked once per theme: the clean-up dialogs must be
+      // solid whichever way the setting is.
+      for (const { glass, ...viewport } of [
+        { width: 1280, height: 800, glass: "on" },
+        { width: 720, height: 800, glass: "on" },
+        { width: 1280, height: 800, glass: "off" },
       ]) {
-        const label = `${theme.mode} ${viewport.width}`;
+        const label = `${theme.mode} ${viewport.width}${glass === "off" ? " glass off" : ""}`;
+        const shotDir = glass === "on" ? shots : null;
         const page = await browser.newPage({ viewport });
         // Glass follows prefers-reduced-transparency, and a macOS runner can
         // report reduce. Pin the default so every runner judges the glass.
@@ -417,12 +420,13 @@ async function main() {
           `${label}: the transparency preference was not pinned`,
         );
         await page.evaluate(
-          ({ theme, text }) => {
+          ({ theme, text, glass }) => {
+            document.documentElement.dataset.glass = glass;
             document.documentElement.dataset.theme = theme.id;
             document.documentElement.dataset.themeMode = theme.mode;
             document.getElementById("terminal").textContent = text;
           },
-          { theme, text: BUSY_TEXT },
+          { theme, text: BUSY_TEXT, glass },
         );
         await page.evaluate((request) => window.mountApproval(request), approvalRequest());
         const dialog = page.getByRole("dialog", { name: "Remove worktrees?" });
@@ -430,7 +434,7 @@ async function main() {
         // Let the scrim's fade-in finish: a filled animation must not hold on.
         await page.waitForTimeout(400);
 
-        if (shots) await page.screenshot({ path: path.join(shots, `approval-${theme.mode}-${viewport.width}.png`) });
+        if (shotDir) await page.screenshot({ path: path.join(shotDir, `approval-${theme.mode}-${viewport.width}.png`) });
         const look = await measureSurface(page, dialog, '[data-testid="worktree-cleanup-approval"]');
         assertSolid(label, look);
 
@@ -455,7 +459,7 @@ async function main() {
         await fold.click();
         await row("abandoned").getByRole("checkbox", { name: "Remove feat/abandoned" }).check();
         await expect(dialog.getByRole("button", { name: "Remove 1 worktree" })).toBeEnabled();
-        if (shots) await page.screenshot({ path: path.join(shots, `approval-${theme.mode}-${viewport.width}-ticked.png`) });
+        if (shotDir) await page.screenshot({ path: path.join(shotDir, `approval-${theme.mode}-${viewport.width}-ticked.png`) });
         assert.deepEqual(errors, [], `${label}: page errors`);
         console.log(`  ok ${label}: fill ${look.background}, leak inside ${look.leak.inside.toFixed(2)} vs outside ${look.leak.outside.toFixed(2)}`);
 
@@ -478,7 +482,7 @@ async function main() {
         await expect(dialog.getByRole("button", { name: /^18 cannot be removed now/ })).toHaveAttribute("aria-expanded", "false");
         assert.equal(await dialog.getByText("keep", { exact: true }).count(), 0, `${label}: a badge says keep`);
         await expect(dialog.getByText("Folder goes. The branch stays, here and on origin, with pull request #213.")).toBeVisible();
-        if (shots) await page.screenshot({ path: path.join(shots, `crowded-${theme.mode}-${viewport.width}.png`) });
+        if (shotDir) await page.screenshot({ path: path.join(shotDir, `crowded-${theme.mode}-${viewport.width}.png`) });
         await dialog.getByRole("button", { name: "Tick all 17" }).click();
         await expect(dialog.getByRole("button", { name: "Remove 17 worktrees" })).toBeEnabled();
         await dialog.getByRole("button", { name: "Untick all" }).click();
@@ -489,9 +493,9 @@ async function main() {
         await expect(dialog.getByRole("heading", { name: "With unsaved changes · 2" })).toBeVisible();
         await expect(dialog.getByRole("heading", { name: "Locked with git worktree lock · 1" })).toBeVisible();
         assert.equal(await dialog.locator("li.is-blocked input").count(), 0, `${label}: a blocked row has a checkbox`);
-        if (shots) {
+        if (shotDir) {
           await dialog.locator(".wtc-fold").scrollIntoViewIfNeeded();
-          await page.screenshot({ path: path.join(shots, `crowded-${theme.mode}-${viewport.width}-ticked-open.png`) });
+          await page.screenshot({ path: path.join(shotDir, `crowded-${theme.mode}-${viewport.width}-ticked-open.png`) });
         }
         await dialog.getByRole("button", { name: "Remove 17 worktrees" }).click();
         const answer = await page.evaluate(() => window.answers[0]);
@@ -509,7 +513,12 @@ async function main() {
           await page.evaluate((mount) => window[mount](), other.mount);
           await expect(other.locator).toBeVisible();
           await page.waitForTimeout(400);
-          if (shots) await page.screenshot({ path: path.join(shots, `${other.name}-${theme.mode}-${viewport.width}.png`) });
+          // Each surface can take focus by script (the clean-up screen does on
+          // its review step); focused, it must keep its shadow, not the ring.
+          await page.keyboard.press("Shift");
+          await page.evaluate((selector) => document.querySelector(selector).focus(), other.selector);
+          assert.ok(await page.evaluate((selector) => document.querySelector(selector).matches(":focus-visible"), other.selector), `${label} ${other.name}: the focus is not visible`);
+          if (shotDir) await page.screenshot({ path: path.join(shotDir, `${other.name}-${theme.mode}-${viewport.width}.png`) });
           const otherLook = await measureSurface(page, other.locator, other.selector);
           assertSolid(`${label} ${other.name}`, otherLook);
           console.log(`  ok ${label} ${other.name}: fill ${otherLook.background}, leak inside ${otherLook.leak.inside.toFixed(2)} vs outside ${otherLook.leak.outside.toFixed(2)}`);
