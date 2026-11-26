@@ -7,7 +7,7 @@ import type { GitCopyWorktreeResult, GitOpResult, GitRemoveWorktreeResult } from
 import { gitChildEnv } from "./git-env";
 import { errorText, readGitText, runGit } from "./git-exec";
 import { parseWorktreePorcelain, type WorktreeRegistration } from "./git-worktree-porcelain";
-import { prepareWorktreeRemoval, restoreWorktreeLinks } from "./worktree-setup/links";
+import { discardHeldLinks, heldText, isDependencyLink, prepareWorktreeRemoval, restoreWorktreeLinks } from "./worktree-setup/links";
 import { reservedDirNames, rowFolders } from "./worktree-folders";
 
 export type { WorktreeRegistration };
@@ -841,6 +841,28 @@ async function tryRemoveWorktreeOnce(
   }
 }
 
+// Untracked node_modules links (isDependencyLink): taken out with setup's
+// links, so a removal never reaches through one. None when git cannot say.
+export async function untrackedDependencyLinks(worktreePath: string): Promise<string[]> {
+  // Each file: a pkg/ holding only a link is listed as pkg/ otherwise.
+  const out = await runGit(worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]).then(
+    (result) => result.stdout,
+    () => "",
+  );
+  const links: string[] = [];
+  const fields = out.split("\0");
+  for (let index = 0; index < fields.length; index += 1) {
+    const field = fields[index];
+    // A rename or copy carries its source in the next field, which is no record.
+    if (field[0] === "R" || field[0] === "C") {
+      index += 1;
+      continue;
+    }
+    if (field.startsWith("?? ") && (await isDependencyLink(worktreePath, field.slice(3)))) links.push(field.slice(3));
+  }
+  return links;
+}
+
 export async function removeCopyWorktree(
   input: RemoveCopyWorktreeInput,
   hooks?: RemoveCopyWorktreeHooks,
@@ -889,15 +911,23 @@ export async function removeCopyWorktree(
   // setup is stopped by the folder's own name, before any move.
   let releasedLinks: Awaited<ReturnType<typeof prepareWorktreeRemoval>>;
   try {
-    releasedLinks = await prepareWorktreeRemoval(original);
+    releasedLinks = await prepareWorktreeRemoval(original, await untrackedDependencyLinks(original));
   } catch (err) {
     return { ok: false, error: errorText(err) };
   }
+  // A link that could not go back, something being in its place, is named.
+  const linksBack = async (where: string): Promise<string> => {
+    // A put-back that threw may have left any of them held: all are named.
+    const kept = await restoreWorktreeLinks(where, releasedLinks).catch(() =>
+      releasedLinks.flatMap((link) => (link.held ? [link.held] : [])),
+    );
+    return heldText(kept);
+  };
   let work = input;
   if (input.aside) {
     const aside = asidePathFor(original);
     const fail = async (error: string, changed = false): Promise<GitRemoveWorktreeResult> => {
-      await restoreWorktreeLinks(original, releasedLinks).catch(() => undefined);
+      error += await linksBack(original);
       return changed ? { ok: false, changed: true, error } : { ok: false, error };
     };
     if (!(await pathIsAbsent(aside))) {
@@ -927,7 +957,10 @@ export async function removeCopyWorktree(
     }
     if (reason) {
       const back = await putBackAside(input.repoCwd, aside, original);
-      if (!back.ok) return { ok: false, changed: true, error: `${reason} ${back.error}` };
+      if (!back.ok) {
+        // It stays where it was moved: its links come back there.
+        return { ok: false, changed: true, error: `${reason} ${back.error}${await linksBack(aside)}` };
+      }
       return fail(reason, true);
     }
     work = { ...input, worktreePath: aside };
@@ -953,14 +986,18 @@ export async function removeCopyWorktree(
   }
   if (!removed) {
     const stuck = await putBack();
-    await restoreWorktreeLinks(stuck ? work.worktreePath : original, releasedLinks).catch(() => undefined);
-    return { ok: false, error: `${lastError}${stuck}` };
+    return { ok: false, error: `${lastError}${stuck}${await linksBack(stuck ? work.worktreePath : original)}` };
   }
 
+  await discardHeldLinks(releasedLinks).catch(() => undefined);
   // Best-effort: only this worktree's own registration, if one was left.
   await dropMissingWorktreeRegistration(input.repoCwd, work.worktreePath);
   if (work !== input) await clearAsideNote(input.repoCwd, work.worktreePath);
-  return finishBranch(input);
+  const done = await finishBranch(input);
+  // What each of the user's links read, for the audit log: the one thing
+  // of theirs that went with the folder.
+  const userLinks = releasedLinks.flatMap((link) => (link.exact !== undefined ? [{ path: link.path, text: link.exact }] : []));
+  return done.ok && userLinks.length ? { ...done, links: userLinks } : done;
 }
 
 async function pathIsAbsent(path: string): Promise<boolean> {

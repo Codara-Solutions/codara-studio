@@ -45,7 +45,7 @@ import {
 import { proveByMergedPullRequestStack } from "../merged-pull-request-stack";
 import { isKeptBranch } from "./kept-branches";
 import type { LeftoverSystem } from "./leftovers";
-import { setupProvidedEntries } from "../worktree-setup/links";
+import { isDependencyLink, setupProvidedEntries } from "../worktree-setup/links";
 import { folderIdentity } from "../worktree-folders";
 
 // Facts about every worktree of the repositories behind the user's
@@ -814,9 +814,43 @@ export function parseStatus(output: string): StatusCounts {
   return { tracked, untracked, raw: output };
 }
 
+const COLLAPSED_LINK_FOLDERS = 20;
+
+// An untracked node_modules link (isDependencyLink) is no one's work: the
+// removal takes the link out first, never what it points at. It is left out
+// of the counts and of the raw status a confirmation is tied to.
 export async function readStatus(path: string, untracked: "all" | "normal"): Promise<StatusCounts> {
   const { stdout } = await runGit(path, ["status", "--porcelain=v1", "-z", `--untracked-files=${untracked}`]);
-  return parseStatus(stdout);
+  const status = parseStatus(stdout);
+  const links = new Set<string>();
+  for (const entry of status.untracked) if (await isDependencyLink(path, entry)) links.add(entry);
+  // A new folder git lists as one entry (pkg/) that holds only such links,
+  // as each file under it shows: a few folders, so a big one costs no walk.
+  const folders = untracked === "normal" ? status.untracked.filter((entry) => entry.endsWith("/")) : [];
+  if (folders.length <= COLLAPSED_LINK_FOLDERS) {
+    for (const folder of folders) {
+      const inside = await runGit(path, ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", folder]).then(
+        (result) => parseStatus(result.stdout),
+        () => null,
+      );
+      if (!inside || inside.tracked.length || !inside.untracked.length || inside.untracked.length > COLLAPSED_LINK_FOLDERS) continue;
+      let onlyLinks = true;
+      for (const entry of inside.untracked) if (!(await isDependencyLink(path, entry))) onlyLinks = false;
+      if (onlyLinks) links.add(folder);
+    }
+  }
+  if (!links.size) return status;
+  const fields = stdout.split("\0");
+  const kept: string[] = [];
+  for (let i = 0; i < fields.length; i += 1) {
+    const field = fields[i];
+    const code = field.slice(0, 2);
+    if (code === "??" && links.has(field.slice(3))) continue;
+    kept.push(field);
+    // A rename or copy carries its old path in the next field.
+    if (field.length >= 4 && (code[0] === "R" || code[0] === "C") && i + 1 < fields.length) kept.push(fields[++i]);
+  }
+  return parseStatus(kept.join("\0"));
 }
 
 export async function lastActivity(path: string, head: string | null, root: string): Promise<number | null> {
