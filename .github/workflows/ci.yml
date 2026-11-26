@@ -101,6 +101,10 @@ jobs:
     # A skipped required check counts as passed, so on a draft this job is
     # skipped under another name: the pull request has no "test" check until
     # it is marked ready, and a missing required check blocks the merge.
+    # GitHub does not evaluate a skipped job's name, so on a draft the check
+    # is listed under this expression's text. A plain "test" here would be
+    # mergeable as soon as the pull request is ready, before the gate's new
+    # check run exists (about 20 minutes, while the parts run).
     name: ${{ github.event.pull_request.draft && 'test (skipped, draft)' || 'test' }}
     needs: [test-pool, test-serial]
     # Otherwise this job must run and fail whenever any part did not succeed:
