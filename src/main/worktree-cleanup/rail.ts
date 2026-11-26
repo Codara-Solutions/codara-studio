@@ -40,6 +40,7 @@ import {
   mapLimited,
   isAtOrUnder,
   lastActivity,
+  lastWorkAt,
   mergeFacts,
   pathKey,
   targetFor,
@@ -440,7 +441,7 @@ async function statesOf(
       facts.state === "merged" &&
       (await autoMergedRefusal(repo, workspace, facts, shortName(registration?.branch), head)) === null &&
       (await quietRefusal(workspace.cwd, head, repo.root, now, autoMerged)) === null;
-    const stale = empty && !missing && (await isStale(workspace, head, repo.root, now));
+    const stale = empty && !missing && (await isStale(workspace, head, repo.root, now, workClock(deps)));
     return {
       ...base,
       merge: empty ? "empty" : facts.state,
@@ -475,15 +476,27 @@ async function freshlyMade(deps: WorktreeCleanupDeps, repo: RepoContext, workspa
   if (!(await isAncestor(repo.root, head, target.commit).catch(() => true))) return false;
   const merge = { state: "merged" as const, proof: "ancestor" as const };
   if (await finishedWork(repo.root, merge, head, shortName(registration?.branch), [workspace]).catch(() => false)) return false;
-  return !(await isStale(workspace, head, repo.root, deps.now().getTime()).catch(() => false));
+  // Whether the maker's tab holds it keeps the cautious clock (git's own
+  // files too): what lets a removal go is not this clock's to decide.
+  return !(await isStale(workspace, head, repo.root, deps.now().getTime(), cautiousClock).catch(() => false));
+}
+
+type ActivityClock = (workspace: Workspace, head: string, root: string) => Promise<number | null>;
+
+const cautiousClock: ActivityClock = (workspace, head, root) => lastActivity(workspace.cwd, head, root);
+
+// The row's "stale": its last commit, changed file or agent turn, not the
+// times git gives its own files with nobody there.
+function workClock(deps: WorktreeCleanupDeps): ActivityClock {
+  return (workspace, head, root) => lastWorkAt(workspace.cwd, head, root, deps.lastAgentTurnAt?.([workspace.id], [workspace.cwd]) ?? null);
 }
 
 // Created long ago and not touched since. A worktree of no known age is not
 // old enough to offer: only a row that says when it was made counts.
-async function isStale(workspace: Workspace, head: string, root: string, now: number): Promise<boolean> {
+async function isStale(workspace: Workspace, head: string, root: string, now: number, clock: ActivityClock): Promise<boolean> {
   const createdAt = Date.parse(workspace.copyBranch?.createdAt ?? "");
   if (!Number.isFinite(createdAt) || now - createdAt < STALE_AFTER_MS) return false;
-  const active = await lastActivity(workspace.cwd, head, root).catch(() => null);
+  const active = await clock(workspace, head, root).catch(() => null);
   return active !== null && now - active >= STALE_AFTER_MS;
 }
 
@@ -614,7 +627,9 @@ async function cleanUpRegistered(
   // A click takes only merged, committed work (railRefusal), so the maker's
   // tab in another folder (a coordinator open for days) does not hold it.
   // A worktree just made, with nothing committed yet, is where that agent
-  // is about to start; the rail offers it only once it is stale.
+  // is about to start. The rail can offer a row as stale by the work clock
+  // while this cautious clock (git's own files too) still holds the click:
+  // the click is then refused, the safe way round.
   const makerElsewhereOk = request.mode === "manual" && !(await freshlyMade(deps, repo, workspace, path));
   // Processes left running inside are judged apart (leftovers.ts) when they
   // can be stopped; the removal itself never accepts one.

@@ -21,6 +21,7 @@ import * as pty from "./pty-manager";
 import { CodexTerminalScreen } from "./codex-terminal-screen";
 import { CodexRolloutTail, type CodexRolloutEvent } from "./codex-rollout-tail";
 import { latestSessionStart } from "./agent-session-registry";
+import { lastAgentTurnAt, noteAgentTurn } from "./agent-turn-ledger";
 import { descendantProcessesWithCommands, type OwnedProcessIdentity } from "./owned-process-tree";
 import { emitTerminalAgentState, paneSourceKey, publish, rearm } from "./notify";
 import { nudgeUsageRefresh } from "./orchestration/usage-activity-refresh";
@@ -322,6 +323,13 @@ interface PaneWatcher {
   lastOutputAt: number;
   // Last RuntimeState pushed to the renderer chip; dedups the chip channel.
   lastEmittedState: RuntimeState | null;
+  // For the worktree idle clock: whether the agent is at work (in a turn,
+  // in the background, or blocked inside one), every folder it was seen in
+  // since, and the folder its last Claude hook reported.
+  clockBusy: boolean;
+  clockCwds: Set<string>;
+  hookCwd: string | null;
+  clockStampedAt: number;
 }
 
 const watchers = new Map<string, PaneWatcher>();
@@ -482,6 +490,10 @@ export function syncTerminalNotifyPanes(input: {
       agentProcCheckInflight: false,
       lastOutputAt: 0,
       lastEmittedState: null,
+      clockBusy: false,
+      clockCwds: new Set(),
+      hookCwd: null,
+      clockStampedAt: 0,
     };
     watchers.set(entry.paneId, watcher);
     attach(watcher);
@@ -601,6 +613,8 @@ function removeWatcher(paneId: string): void {
   const w = watchers.get(paneId);
   if (!w) return;
   tanLog(`pane=${paneId} watcher removed`);
+  // Closed mid-turn: the work ends now.
+  if (w.clockBusy) stampWork(w, Date.now(), true);
   watchers.delete(paneId);
   for (const listener of paneRemovedListeners) {
     try {
@@ -633,6 +647,10 @@ function removeWatcher(paneId: string): void {
 // Everything that belongs to one agent session in the pane. A new agent
 // (or the same CLI relaunched) starts with no turn and no trusted signals.
 function resetAgentSession(w: PaneWatcher): void {
+  if (w.clockBusy) stampWork(w, Date.now(), true);
+  w.clockBusy = false;
+  w.clockCwds.clear();
+  w.hookCwd = null;
   cancelPendingDone(w, "agent session reset");
   clearCodexScreen(w);
   w.state = "idle";
@@ -676,6 +694,8 @@ function ensureSweep(): void {
         continue;
       }
       if (!w.runtime) continue;
+      // A long tool call changes no state: still work, stamped as it goes.
+      if (w.clockBusy) stampWork(w, now, false);
       sweepBackground(w, now);
       if (w.runtime === "codex") pollCodexRollout(w);
       if (w.runtime === "codex" && w.codexScreen) {
@@ -939,6 +959,7 @@ function startTurn(w: PaneWatcher, now: number, source: AgentTurn["source"], ses
     w.lastWorkingAt = 0;
   }
   w.turn = { startedAt: now, source, sessionId, announced: false, announcedAt: 0 };
+  stampWork(w, now, true);
   w.lastTurnStartedAt = now;
   w.finalMessage = null;
   // A turn held for background work is superseded; this one is announced.
@@ -1330,6 +1351,14 @@ export function noteTerminalHookEvent(
   if (nested) return;
   // Every hook a background agent fires shows it still works.
   if (agentId) w.background.noteTaskSign(agentId, now);
+  // Where the agent is now: its Bash tool may have moved since the start.
+  const hookCwd = stringField(payload, "cwd");
+  if (hookCwd && path.isAbsolute(hookCwd)) {
+    w.hookCwd = hookCwd;
+    // Every folder it passes through, also between two stamps.
+    if (w.clockBusy) addClockCwd(w.clockCwds, hookCwd);
+  }
+  if (w.clockBusy) stampWork(w, now, false);
   switch (hookName) {
     case "UserPromptSubmit": {
       if (agentId) return;
@@ -2541,6 +2570,7 @@ function emitPaneState(w: PaneWatcher, chipState: RuntimeState): void {
   const previousState = w.lastEmittedState;
   w.lastEmittedState = chipState;
   const now = Date.now();
+  noteClockState(w, chipState, now);
   const workingSince = nextWorkingSince(previousState, chipState, w.activity.workingSince, now);
   // A prompt answered or gone takes its question with it.
   noteActivity(
@@ -2622,6 +2652,7 @@ export function onTerminalAgentTurnEnded(listener: (event: TerminalAgentTurnEnd)
 function emitTurnEnded(w: PaneWatcher, failed: boolean, body: string | null, origin: DoneOrigin | null): void {
   const event = { paneId: w.paneId, failed, message: failed ? body : (w.finalMessage ?? body), at: Date.now() };
   w.lastTurnEnd = { at: event.at, failed, origin: failed ? null : origin };
+  stampWork(w, event.at, true);
   for (const listener of turnEndListeners) {
     try {
       listener(event);
@@ -2766,6 +2797,95 @@ export function terminalAgentActivitySnapshot(): TerminalAgentActivity[] {
     });
   }
   return out;
+}
+
+// ── The worktree idle clock ──────────────────────────────────────────────
+
+// A turn's start and its end, however it ended (done, interrupted, closed,
+// gone). Blocked counts only after work began: a prompt at startup is no
+// work yet, a permission asked inside a turn is.
+function noteClockState(w: PaneWatcher, state: RuntimeState, now: number): void {
+  const busy =
+    state === "working" ||
+    state === "background" ||
+    state === "stalled" ||
+    (state === "blocked" && (w.clockBusy || (w.turn !== null && !w.turn.announced)));
+  if (busy === w.clockBusy) {
+    if (busy) stampWork(w, now, false);
+    return;
+  }
+  w.clockBusy = busy;
+  stampWork(w, now, true);
+  if (!busy) w.clockCwds.clear();
+}
+
+// Every folder the pane's agent may be working in: the one its last Claude
+// hook reported, the one its live session started in, the terminal's
+// foreground process's (Linux) and the shell's start. Crediting each errs
+// towards "worked here lately", never towards idle.
+function workCwds(w: PaneWatcher): string[] {
+  const cwds = new Set<string>();
+  if (w.hookCwd) cwds.add(w.hookCwd);
+  const record = latestSessionStart(w.paneId);
+  if (record?.cwd && record.runtime === w.runtime && record.sessionId && record.sessionId === w.scheduledSession) cwds.add(record.cwd);
+  try {
+    const pid = process.platform === "linux" ? pty.sessionPid(w.paneId) : null;
+    if (pid) {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      const foreground = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[5]);
+      cwds.add(fs.readlinkSync(`/proc/${Number.isSafeInteger(foreground) && foreground > 0 ? foreground : pid}/cwd`));
+    }
+  } catch {
+    // A process that exited: the other folders.
+  }
+  try {
+    const start = pty.sessionCwd(w.paneId);
+    if (start) cwds.add(start);
+  } catch {
+    // No session: the other folders.
+  }
+  const resolved = new Set<string>();
+  for (const cwd of cwds) addClockCwd(resolved, cwd);
+  return [...resolved];
+}
+
+// A folder as spelled and as resolved through links: the clean-up compares
+// against resolved paths, the pane may know only a symlinked spelling.
+function addClockCwd(cwds: Set<string>, cwd: string): void {
+  cwds.add(cwd);
+  try {
+    cwds.add(fs.realpathSync(cwd));
+  } catch {
+    // Gone or unreadable: the spelling alone.
+  }
+}
+
+const CLOCK_STAMP_EVERY_MS = 10_000;
+
+// The work is credited to every folder seen since it began, through to its end.
+function stampWork(w: PaneWatcher, at: number, edge: boolean): void {
+  // Replayed output is history, not work now.
+  if (w.excluded || !w.runtime || w.replayingTail) return;
+  // Inside a turn, a stamp every few seconds is plenty.
+  if (!edge && at - w.clockStampedAt < CLOCK_STAMP_EVERY_MS) return;
+  w.clockStampedAt = at;
+  for (const cwd of workCwds(w)) w.clockCwds.add(cwd);
+  noteAgentTurn(w.workspaceId, [...w.clockCwds], at, edge);
+}
+
+/**
+ * When an agent `include` takes (by the pane's workspace and a folder it
+ * worked in, null when none is known) last worked: now while one is at
+ * work, else its last turn's start or end, also for a pane closed since or
+ * a turn before a restart; null when none did.
+ */
+export function terminalAgentLastTurnAt(include: (workspaceId: string, cwd: string | null) => boolean, now = Date.now()): number | null {
+  for (const w of watchers.values()) {
+    if (w.excluded || w.disposing || !w.runtime || !w.clockBusy) continue;
+    const cwds = new Set([...w.clockCwds, ...workCwds(w)]);
+    if (cwds.size ? [...cwds].some((cwd) => include(w.workspaceId, cwd)) : include(w.workspaceId, null)) return now;
+  }
+  return lastAgentTurnAt(include);
 }
 
 // What codara_session_status reads of one pane; null when no watcher holds it.

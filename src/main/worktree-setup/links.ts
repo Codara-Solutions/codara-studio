@@ -10,7 +10,7 @@
 // and their tests bundle them without the rest of the setup code.
 
 import { promises as fsp } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 
 export const SETUP_DIR_NAME = "codara-setup";
 export const SETUP_MANIFEST_FILE = "manifest.json";
@@ -26,6 +26,30 @@ export interface SetupManifestCopy {
 export interface SetupManifestLink {
   path: string;
   target: string;
+  /** A link the user made, as it read (its text). */
+  exact?: string;
+  /**
+   * Where that link itself was moved, outside the worktree, for the
+   * removal: moved back on a failure, so it returns exactly as it was (its
+   * kind, its text), and deleted only once the worktree is gone.
+   */
+  held?: string;
+}
+
+/** A user's link held for a removal and not put back: which one, and where it is. */
+export interface HeldLink {
+  path: string;
+  held: string;
+}
+
+/** A removal stopped before git ran; `held` lists the links that stayed held. */
+export class HeldLinksError extends Error {
+  constructor(
+    message: string,
+    readonly held: HeldLink[],
+  ) {
+    super(message + heldText(held));
+  }
 }
 
 export interface SetupManifest {
@@ -147,17 +171,112 @@ export async function removeLinkEntry(absolute: string): Promise<boolean> {
 }
 
 /**
- * Takes out the folder links setup made, so removing the worktree can never
- * reach into the main checkout through them. A link or junction at a path
- * setup linked goes even when something repointed it since: git for Windows
- * follows any junction while deleting, whatever it points at. Removing a
- * link never touches what it points at; each comes back with the target it
- * had when the removal fails.
+ * Puts an entry held for a removal back at `to`, only when nothing is
+ * there, with calls that never replace anything: a link is made again with
+ * the text it reads (symlink; link() would follow it on macOS), a regular
+ * file is hard-linked, then the held name goes. Anything else, or any
+ * error, leaves it where it is held: false.
  */
-export async function releaseWorktreeLinks(worktreePath: string): Promise<SetupManifestLink[]> {
+export async function putBackNoReplace(from: string, to: string): Promise<boolean> {
+  const info = await fsp.lstat(from).catch(() => null);
+  if (!info) return false;
+  try {
+    if (info.isSymbolicLink()) await fsp.symlink(await fsp.readlink(from), to);
+    else if (info.isFile()) await fsp.link(from, to);
+    else return false;
+  } catch {
+    return false;
+  }
+  await fsp.unlink(from).catch(() => undefined);
+  return true;
+}
+
+/**
+ * An untracked entry git lists that is only a link to installed packages: a
+ * node_modules link made by hand, or by a setup whose `node_modules/` ignore
+ * rule (folders only) does not cover a link. Nothing of anyone's is in it.
+ */
+export async function isDependencyLink(worktreePath: string, relative: string): Promise<boolean> {
+  // A junction on Windows is a folder to the calls that would hold it and
+  // put it back: one there stays a new file, asked about.
+  if (process.platform === "win32") return false;
+  if (!safeRelative(relative) || basename(relative) !== "node_modules") return false;
+  const absolute = join(worktreePath, ...relative.split("/"));
+  // Its folder must be the worktree's own: through a linked parent, the
+  // link taken out would be somewhere else.
+  const [root, parent] = await Promise.all([
+    fsp.realpath(worktreePath).catch(() => null),
+    fsp.realpath(dirname(absolute)).catch(() => null),
+  ]);
+  if (!root || !parent || (parent !== root && !parent.startsWith(root.endsWith(sep) ? root : root + sep))) return false;
+  // Its text must read back byte for byte: one that is no UTF-8 would be
+  // made again (and logged) as something else.
+  const raw = await fsp.readlink(absolute, { encoding: "buffer" }).catch(() => null);
+  if (!raw || !Buffer.from(raw.toString("utf8"), "utf8").equals(raw)) return false;
+  return (await linkTarget(absolute)) !== null;
+}
+
+// Whether something may still be at the path: a link, or an entry that
+// cannot be read. Only a missing entry, or a real folder or file, says no.
+async function linkMayRemain(absolute: string): Promise<boolean> {
+  try {
+    return (await fsp.lstat(absolute)).isSymbolicLink();
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return code !== "ENOENT" && code !== "ENOTDIR";
+  }
+}
+
+/**
+ * Takes out the folder links setup made, and the untracked dependency links
+ * named (isDependencyLink), so removing the worktree can never reach into
+ * the main checkout through them. A link or junction at a path setup linked
+ * goes even when something repointed it since: git for Windows follows any
+ * junction while deleting, whatever it points at. Removing a link never
+ * touches what it points at; each comes back with the target it had when
+ * the removal fails.
+ */
+export async function releaseWorktreeLinks(worktreePath: string, dependencyLinks: readonly string[] = []): Promise<SetupManifestLink[]> {
   const manifest = await readSetupManifest(worktreePath).catch(() => null);
-  if (!manifest) return [];
   const released: SetupManifestLink[] = [];
+  let holding: string | null = null;
+  for (const path of dependencyLinks) {
+    if (!(await isDependencyLink(worktreePath, path))) continue;
+    const absolute = join(worktreePath, ...path.split("/"));
+    const before = await fsp.lstat(absolute).catch(() => null);
+    const pointsAt = await linkTarget(absolute);
+    if (!before?.isSymbolicLink() || pointsAt === null) continue;
+    const target = resolve(dirname(absolute), withoutLongPathPrefix(pointsAt));
+    // Moved, never deleted here: beside the worktree, out of the removal's
+    // way, and checked to be the very link that was read. One that cannot
+    // be moved stays, and the check after this stops the removal.
+    try {
+      holding ??= await fsp.mkdtemp(`${resolve(worktreePath)}.links-`);
+    } catch {
+      continue;
+    }
+    const held = join(holding, String(released.length));
+    try {
+      await fsp.rename(absolute, held);
+    } catch {
+      continue;
+    }
+    const moved = await fsp.lstat(held).catch(() => null);
+    const text = moved?.isSymbolicLink() ? await fsp.readlink(held).catch(() => null) : null;
+    if (!moved || moved.ino !== before.ino || moved.dev !== before.dev || text !== pointsAt) {
+      const kept: HeldLink[] = (await putBackNoReplace(held, absolute)) ? [] : [{ path, held }];
+      kept.push(...(await restoreWorktreeLinks(worktreePath, released)));
+      if (!kept.length) await fsp.rmdir(holding).catch(() => undefined);
+      throw new HeldLinksError(
+        `${path} changed while it was being taken out before removing the worktree, so nothing was removed.`,
+        kept,
+      );
+    }
+    released.push({ path, target, exact: pointsAt, held });
+  }
+  // A holding folder nothing went into.
+  if (holding && !released.length) await fsp.rmdir(holding).catch(() => undefined);
+  if (!manifest) return released;
   for (const link of manifest.links) {
     if (!safeRelative(link.path)) continue;
     const absolute = join(worktreePath, ...link.path.split("/"));
@@ -185,37 +304,65 @@ export function setBeforeWorktreeRemoval(hook: ((worktreePath: string) => Promis
  * link it made is still there: git for Windows can follow a junction while
  * deleting the worktree and empty the main checkout's folder.
  */
-export async function prepareWorktreeRemoval(worktreePath: string): Promise<SetupManifestLink[]> {
+export async function prepareWorktreeRemoval(worktreePath: string, dependencyLinks: readonly string[] = []): Promise<SetupManifestLink[]> {
   if (beforeRemoval && !(await beforeRemoval(worktreePath).catch(() => false))) {
     throw new Error("The worktree's setup did not stop in time. Stop it from the setup tray, then remove the worktree again.");
   }
-  const released = await releaseWorktreeLinks(worktreePath);
+  const released = await releaseWorktreeLinks(worktreePath, dependencyLinks);
   const manifest = await readSetupManifest(worktreePath).catch(() => null);
-  for (const link of manifest?.links ?? []) {
-    if (!safeRelative(link.path)) continue;
-    if ((await linkTarget(join(worktreePath, ...link.path.split("/")))) !== null) {
-      await restoreWorktreeLinks(worktreePath, released);
-      throw new Error(
-        `Could not take out the linked folder ${link.path} before removing the worktree. Close what uses it, then try again.`,
+  // Every link that was to go must be gone, the user's own included.
+  const paths = [...(manifest?.links ?? []).map((link) => link.path), ...dependencyLinks];
+  for (const path of paths) {
+    if (!safeRelative(path)) continue;
+    if (await linkMayRemain(join(worktreePath, ...path.split("/")))) {
+      const kept = await restoreWorktreeLinks(worktreePath, released);
+      throw new HeldLinksError(
+        `Could not take out the linked folder ${path} before removing the worktree. Close what uses it, then try again.`,
+        kept,
       );
     }
   }
   return released;
 }
 
-/** Puts back links released for a removal that then failed. */
-export async function restoreWorktreeLinks(worktreePath: string, links: readonly SetupManifestLink[]): Promise<void> {
+/**
+ * Puts back links released for a removal that then failed. Returns the
+ * held links that stayed held because something took their place.
+ */
+export async function restoreWorktreeLinks(worktreePath: string, links: readonly SetupManifestLink[]): Promise<HeldLink[]> {
+  const kept: HeldLink[] = [];
   for (const link of links) {
     if (!safeRelative(link.path)) continue;
     const absolute = join(worktreePath, ...link.path.split("/"));
+    if (link.held) {
+      // The link itself comes back, never over anything; else it stays held.
+      if (await putBackNoReplace(link.held, absolute)) await fsp.rmdir(dirname(link.held)).catch(() => undefined);
+      else kept.push({ path: link.path, held: link.held });
+      continue;
+    }
     if (await fsp.lstat(absolute).catch(() => null)) continue;
-    const target = await fsp.stat(link.target).catch(() => null);
-    if (!target?.isDirectory()) continue;
     try {
+      const target = await fsp.stat(link.target).catch(() => null);
+      if (!target?.isDirectory()) continue;
       await fsp.symlink(link.target, absolute, process.platform === "win32" ? "junction" : "dir");
     } catch {
       // Best effort: the worktree still works, only without that folder.
     }
+  }
+  return kept;
+}
+
+/** Which links stayed held and where, for an error: every one, so none is lost track of. */
+export function heldText(kept: readonly HeldLink[]): string {
+  return kept.length ? ` Its node_modules links are kept: ${kept.map((link) => `${link.path} at ${link.held}`).join("; ")}.` : "";
+}
+
+/** Once the worktree is gone: deletes the user's links held for its removal (the links, never what they point at). */
+export async function discardHeldLinks(links: readonly SetupManifestLink[]): Promise<void> {
+  for (const link of links) {
+    if (!link.held) continue;
+    await removeLinkEntry(link.held);
+    await fsp.rmdir(dirname(link.held)).catch(() => undefined);
   }
 }
 

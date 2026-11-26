@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, promises as fsp } from "node:fs";
+import { existsSync, lstatSync, promises as fsp, readdirSync, readFileSync } from "node:fs";
 import { readlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import { devNull } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { isRemotePath } from "@shared/remote";
 import {
@@ -184,6 +185,10 @@ export interface AgentWorktreeAuditEntry {
   givenUp?: { pr: number; remoteCommit: string } | null;
   /** What the user was told, when a press ended before the removal. */
   message?: string | null;
+  /** The user's node_modules links that went with a removed folder, as each read. */
+  links?: Array<{ path: string; text: string }>;
+  /** The user's node_modules links a failed removal left held, and where. */
+  heldLinks?: Array<{ path: string; held: string }>;
 }
 
 export interface AgentWorktreeDeps {
@@ -780,17 +785,218 @@ const PACKAGE_MANIFESTS = [
   "deno.json",
 ];
 
-/** Tells whether a folder of the worktree at `root` holds a package manifest. */
-export function packageRootTester(root: string): (dir: string) => boolean {
+// Folders a tool writes again beside its own configuration, at any depth
+// (the root included): Terraform's .terraform/ next to the lock file
+// terraform init writes, holding only what init writes there. Only beside
+// that file and with nothing else in it, so a hand-made folder of that name,
+// or a note left in one, is asked about.
+interface ToolOutputDir {
+  beside: readonly string[];
+  holds: readonly string[];
+  /** The folder's contents below its top level are the tool's too (given its absolute path). */
+  deep(absolute: string): boolean;
+}
+
+const TOOL_OUTPUT_WALK_LIMIT = 5_000;
+
+// What terraform init writes below .terraform/: provider binaries
+// (terraform-provider-*, with lock.json in the old plugins/ layout) or links
+// into its plugin cache under providers/ and plugins/, and under modules/
+// its modules.json beside one folder per module that file names, each a
+// clone (checked on its own: isPristineModuleDownload). Anything else, or a
+// walk cut short, is someone's.
+function terraformOutputOnly(absolute: string): boolean {
+  let budget = TOOL_OUTPUT_WALK_LIMIT;
+  const entries = (dir: string) => {
+    try {
+      return readdirSync(dir, { withFileTypes: true });
+    } catch (err) {
+      return (err as NodeJS.ErrnoException)?.code === "ENOENT" ? [] : null;
+    }
+  };
+  for (const sub of ["providers", "plugins"]) {
+    const stack = [join(absolute, sub)];
+    while (stack.length) {
+      const dir = stack.pop()!;
+      const children = entries(dir);
+      if (!children) return false;
+      for (const child of children) {
+        if ((budget -= 1) < 0) return false;
+        if (child.isDirectory()) stack.push(join(dir, child.name));
+        else if (!child.isSymbolicLink() && !/^terraform-provider-/.test(child.name) && child.name !== "lock.json") return false;
+      }
+    }
+  }
+  const modules = entries(join(absolute, "modules"));
+  if (!modules) return false;
+  // Its manifest, when there, is the file terraform writes and reads.
+  const manifest = modules.find((child) => child.name === "modules.json");
+  const named = manifest ? (manifest.isFile() ? moduleFolders(join(absolute, "modules", "modules.json")) : null) : new Set<string>();
+  if (!named) return false;
+  const folders = modules.filter((child) => child !== manifest);
+  if (!folders.length) return terraformFilesOnly(absolute);
+  return (
+    !!named &&
+    folders.every(
+      (child) =>
+        child.isDirectory() &&
+        named.has(child.name) &&
+        (() => {
+          try {
+            return lstatSync(join(absolute, "modules", child.name, ".git")).isDirectory();
+          } catch {
+            return false;
+          }
+        })(),
+    ) &&
+    terraformFilesOnly(absolute)
+  );
+}
+
+// Bigger than this, a file in .terraform/ is not one init wrote there.
+const TERRAFORM_FILE_MAX_BYTES = 1024 * 1024;
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === "object" && !Array.isArray(value);
+const isEmpty = (value: unknown) =>
+  value === undefined || (Array.isArray(value) ? value.length === 0 : isPlainObject(value) && Object.keys(value).length === 0);
+const onlyKeys = (value: Record<string, unknown>, keys: readonly string[]) => Object.keys(value).every((key) => keys.includes(key));
+
+// The backend record terraform init writes as .terraform/terraform.tfstate:
+// only its own keys, a backend with a type, and modules with no output and
+// no resource. Anything else (outputs, resources, a key it never writes) may
+// be state someone keeps, so the folder is asked about.
+export function isTerraformBackendRecord(text: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  if (!isPlainObject(parsed) || !onlyKeys(parsed, ["version", "serial", "lineage", "terraform_version", "backend", "modules"])) return false;
+  const backend = parsed.backend;
+  if (!isPlainObject(backend) || !onlyKeys(backend, ["type", "config", "hash"]) || typeof backend.type !== "string") return false;
+  if (backend.config !== undefined && !isPlainObject(backend.config)) return false;
+  if (parsed.modules === undefined) return true;
+  if (!Array.isArray(parsed.modules)) return false;
+  return parsed.modules.every(
+    (module) =>
+      isPlainObject(module) &&
+      onlyKeys(module, ["path", "outputs", "resources", "depends_on"]) &&
+      Array.isArray(module.path) &&
+      module.path.every((part) => typeof part === "string") &&
+      isEmpty(module.outputs) &&
+      isEmpty(module.resources) &&
+      (module.depends_on === undefined || (Array.isArray(module.depends_on) && module.depends_on.length === 0)),
+  );
+}
+
+// The files init writes at the top of .terraform/: terraform.tfstate only
+// as its backend record (isTerraformBackendRecord), environment the
+// workspace's name on one line, plugin_path a list of folders.
+function terraformFilesOnly(absolute: string): boolean {
+  const read = (name: string): string | null | undefined => {
+    try {
+      const stat = lstatSync(join(absolute, name));
+      if (!stat.isFile() || stat.size > TERRAFORM_FILE_MAX_BYTES) return null;
+      return readFileSync(join(absolute, name), "utf8");
+    } catch (err) {
+      return (err as NodeJS.ErrnoException)?.code === "ENOENT" ? undefined : null;
+    }
+  };
+  const state = read("terraform.tfstate");
+  if (state === null || (state !== undefined && !isTerraformBackendRecord(state))) return false;
+  const environment = read("environment");
+  if (environment === null || (environment !== undefined && !/^[^\s/\\]{1,90}\n?$/.test(environment))) return false;
+  const pluginPath = read("plugin_path");
+  if (pluginPath === null) return false;
+  if (pluginPath !== undefined) {
+    try {
+      const folders: unknown = JSON.parse(pluginPath);
+      if (!Array.isArray(folders) || !folders.every((folder) => typeof folder === "string")) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+// The folders under .terraform/modules/ that terraform's modules.json names
+// (its Dir entries); null when it cannot be read, or when any record is not
+// one terraform writes (a string Key, Source and Dir): a record skipped
+// could be the one naming a folder of someone's.
+export function terraformModuleFolders(text: string): Set<string> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!isPlainObject(parsed) || !Array.isArray(parsed.Modules)) return null;
+  const names = new Set<string>();
+  for (const module of parsed.Modules) {
+    if (!isPlainObject(module) || typeof module.Key !== "string" || typeof module.Source !== "string" || typeof module.Dir !== "string") {
+      return null;
+    }
+    if (module.Version !== undefined && typeof module.Version !== "string") return null;
+    const match = /^\.terraform\/modules\/([^/]+)(?:\/|$)/.exec(module.Dir.replace(/\\/g, "/"));
+    if (match) names.add(match[1]);
+  }
+  return names;
+}
+
+function moduleFolders(manifest: string): Set<string> | null {
+  try {
+    const stat = lstatSync(manifest);
+    if (!stat.isFile() || stat.size > TERRAFORM_FILE_MAX_BYTES) return null;
+    return terraformModuleFolders(readFileSync(manifest, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+const TOOL_OUTPUT_DIRS: Readonly<Record<string, ToolOutputDir>> = {
+  ".terraform": {
+    beside: [".terraform.lock.hcl"],
+    holds: ["providers", "modules", "plugins", "plugin_path", "terraform.tfstate", "environment"],
+    deep: terraformOutputOnly,
+  },
+};
+
+/**
+ * Tells whether a folder of the worktree at `root` holds a package manifest,
+ * or one of `manifests` when given. `holdsOnly` tells whether a folder holds
+ * nothing but the named entries; without it no tool's folder is regenerable.
+ */
+export type PackageRootTester = ((dir: string, manifests?: readonly string[]) => boolean) & {
+  holdsOnly?(dir: string, names: readonly string[], deep?: (absolute: string) => boolean): boolean;
+};
+
+export function packageRootTester(root: string): PackageRootTester {
   const known = new Map<string, boolean>();
-  return (dir) => {
-    let found = known.get(dir);
+  const tester: PackageRootTester = (dir, manifests = PACKAGE_MANIFESTS) => {
+    const key = `${dir}\0${manifests.join("\0")}`;
+    let found = known.get(key);
     if (found === undefined) {
-      found = PACKAGE_MANIFESTS.some((name) => existsSync(join(root, dir, name)));
-      known.set(dir, found);
+      found = manifests.some((name) => existsSync(join(root, dir, name)));
+      known.set(key, found);
     }
     return found;
   };
+  tester.holdsOnly = (dir, names, deep) => {
+    const key = `holds\0${dir}\0${names.join("\0")}\0${deep ? "deep" : ""}`;
+    let found = known.get(key);
+    if (found === undefined) {
+      try {
+        found = readdirSync(join(root, dir)).every((name) => names.includes(name)) && (!deep || deep(join(root, dir)));
+      } catch {
+        found = false;
+      }
+      known.set(key, found);
+    }
+    return found;
+  };
+  return tester;
 }
 
 // Directory patterns ("dist/") match a collapsed ignored directory by its
@@ -802,7 +1008,7 @@ export function packageRootTester(root: string): (dir: string) => boolean {
 export function isRegenerableIgnored(
   entry: string,
   extra: readonly string[] = [],
-  isPackageRoot?: (dir: string) => boolean,
+  isPackageRoot?: PackageRootTester,
 ): boolean {
   const normalized = entry.replace(/\\/g, "/");
   const isDir = normalized.endsWith("/");
@@ -811,6 +1017,8 @@ export function isRegenerableIgnored(
   const last = segments[segments.length - 1];
   if (!isSecretFile(last) && isRegenerableCachePath(segments, isDir)) return true;
   const parent = segments.slice(0, -1).join("/");
+  const tool = Object.hasOwn(TOOL_OUTPUT_DIRS, last) ? TOOL_OUTPUT_DIRS[last] : null;
+  if (isDir && tool && isPackageRoot?.(parent, tool.beside) === true && isPackageRoot.holdsOnly?.(segments.join("/"), tool.holds, tool.deep) === true) return true;
   const atPackageRoot = parent === "" || isPackageRoot?.(parent) === true;
   const patterns = !isDir && isSecretFile(last) ? extra : [...REGENERABLE_IGNORED_PATTERNS, ...extra];
   for (const pattern of patterns) {
@@ -831,7 +1039,7 @@ export function isRegenerableIgnored(
 
 // The entry is the path's folder or inside it, the path taken from the
 // worktree's root or from a package root above the entry.
-function underPath(segments: readonly string[], path: readonly string[], isPackageRoot?: (dir: string) => boolean): boolean {
+function underPath(segments: readonly string[], path: readonly string[], isPackageRoot?: PackageRootTester): boolean {
   for (let start = 0; start + path.length <= segments.length; start += 1) {
     if (start > 0 && isPackageRoot?.(segments.slice(0, start).join("/")) !== true) continue;
     if (path.every((part, index) => globToRegExp(part).test(segments[start + index]))) return true;
@@ -880,12 +1088,110 @@ interface NestedScan {
 // reports every file under a folder that is not regenerable (path, size,
 // mtime, in a stable order): a confirmation of those folders is tied to
 // what they held, not only to their names.
+// Where terraform init clones a module: <dir>/.terraform/modules/<name>/.
+const TERRAFORM_MODULE = /^(?:(.+)\/)?\.terraform\/modules\/[^/]+\/$/;
+
+/**
+ * A clone terraform init made of a module, with nothing of anyone's in it:
+ * its own .git folder (not a worktree's or submodule's pointer file), no
+ * change, untracked or ignored file, and no commit, stash or branch that a
+ * remote branch or tag of the clone does not hold. Anything unclear is a
+ * checkout, which blocks.
+ */
+// What terraform writes in a module clone's .git/config; any other key (a
+// filter, an fsmonitor, a hook path) could run a command when git reads the
+// clone, or holds something of someone's.
+const CLONE_CONFIG_KEYS = /^(?:core\.(?:repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks)|remote\.[^\n]+\.(?:url|fetch)|branch\.[^\n]+\.(?:remote|merge))$/i;
+
+async function plainCloneConfig(dotGit: string): Promise<boolean> {
+  const text = await fsp.readFile(join(dotGit, "config"), "utf8").catch(() => null);
+  if (text === null) return false;
+  let section: string | null = null;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#") || line.startsWith(";")) continue;
+    const header = /^\[\s*([A-Za-z0-9.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\]$/.exec(line);
+    if (header) {
+      section = header[2] !== undefined ? `${header[1]}.${header[2]}` : header[1];
+      continue;
+    }
+    const key = /^([A-Za-z][A-Za-z0-9-]*)\s*(?:=|$)/.exec(line)?.[1];
+    if (!section || !key || !CLONE_CONFIG_KEYS.test(`${section}.${key}`)) return false;
+  }
+  // Attributes of its own could name a filter driver defined elsewhere.
+  const attributes = await fsp.readFile(join(dotGit, "info", "attributes"), "utf8").catch(() => "");
+  return !attributes.trim();
+}
+
+// A module terraform init cloned into .terraform/modules/<name>/ and nobody
+// touched since: git really uses its .git folder; its config is what a clone
+// writes (checked before git runs there); nothing changed, new, ignored or
+// hidden from status (assume-unchanged, skip-worktree); and every commit any
+// of its refs holds is on a remote-tracking branch (a local tag proves
+// nothing). Anything unclear keeps it a checkout.
+async function isPristineModuleDownload(
+  root: string,
+  relative: string,
+  extra: readonly string[],
+  isPackageRoot: PackageRootTester,
+): Promise<boolean> {
+  const match = TERRAFORM_MODULE.exec(relative);
+  if (!match || !isRegenerableIgnored(`${match[1] ? `${match[1]}/` : ""}.terraform/`, extra, isPackageRoot)) return false;
+  const clone = join(root, relative);
+  const dotGit = join(clone, ".git");
+  if (!(await fsp.lstat(dotGit).catch(() => null))?.isDirectory()) return false;
+  if (!(await plainCloneConfig(dotGit))) return false;
+  // Git metadata of its own and no one else's: none taken from another
+  // folder (commondir), no worktree of its own registered elsewhere, whose
+  // .git would point into this one, and no submodule's (modules).
+  for (const name of ["commondir", "worktrees", "modules"]) {
+    if ((await fsp.lstat(join(dotGit, name)).catch(() => null)) !== null) return false;
+  }
+  // Its own config only, and only what git needs to run: no global, system
+  // or environment config, where a filter its tracked .gitattributes names
+  // could be defined, and no GIT_* setting of the app's.
+  const env: NodeJS.ProcessEnv = {
+    GIT_CONFIG_GLOBAL: devNull,
+    GIT_CONFIG_SYSTEM: devNull,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_ATTR_NOSYSTEM: "1",
+    GIT_CEILING_DIRECTORIES: dirname(clone),
+  };
+  for (const name of ["PATH", "Path", "SystemRoot", "SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL"]) {
+    if (process.env[name] !== undefined) env[name] = process.env[name];
+  }
+  const git = (args: string[]) =>
+    runGit(clone, ["-c", "core.fsmonitor=false", "-c", `core.hooksPath=${devNull}`, "-c", `core.attributesFile=${devNull}`, ...args], { env });
+  try {
+    // git walks up past a .git folder it cannot use; the worktree's own
+    // status must never answer for the clone.
+    const gitDir = await fsp.realpath((await git(["rev-parse", "--absolute-git-dir"])).stdout.trim());
+    if (gitDir !== (await fsp.realpath(dotGit))) return false;
+    // A submodule is a repository of its own, with a config nothing here
+    // read: git must never run in it, and its commits are no clone's.
+    const staged = await git(["ls-files", "-s", "-z"]);
+    if (staged.stdout.split("\0").some((record) => record.startsWith("160000 "))) return false;
+    const status = await git(["status", "--porcelain", "--ignored", "--untracked-files=all", "--ignore-submodules=all"]);
+    if (status.stdout.trim()) return false;
+    const hidden = await git(["ls-files", "-v", "-z"]);
+    for (const record of hidden.stdout.split("\0")) {
+      const tag = record[0];
+      if (tag && (tag === "S" || tag !== tag.toUpperCase())) return false;
+    }
+    // Its reflogs too: a commit made there and reset away is still someone's.
+    const own = await git(["rev-list", "--count", "--all", "--reflog", "--not", "--remotes"]);
+    return own.stdout.trim() === "0";
+  } catch {
+    return false;
+  }
+}
+
 export async function checkoutsInIgnored(
   root: string,
   entries: readonly string[],
   extra: readonly string[],
   maxDirs = NESTED_SCAN_MAX_DIRS,
-  options: { isPackageRoot?: (dir: string) => boolean; describe?: (line: string) => void } = {},
+  options: { isPackageRoot?: PackageRootTester; describe?: (line: string) => void } = {},
 ): Promise<NestedScan> {
   const isPackageRoot = options.isPackageRoot ?? packageRootTester(root);
   const found: string[] = [];
@@ -896,7 +1202,10 @@ export async function checkoutsInIgnored(
   const visit = async (relative: string, described: boolean): Promise<{ dirs: string[]; lines: string[] } | null> => {
     const absolute = join(root, relative);
     if (existsSync(join(absolute, ".git"))) {
-      found.push(resolve(absolute));
+      // A module terraform init cloned, untouched since, comes back with
+      // the next init: it is that tool's output, not a checkout of anyone's.
+      // The removal's last fingerprint covers its files and git state.
+      if (!(await isPristineModuleDownload(root, relative, extra, isPackageRoot))) found.push(resolve(absolute));
       return { dirs: [], lines: [] };
     }
     const children = await fsp
@@ -3527,7 +3836,11 @@ export async function removeAgentWorktree(
     else throw err;
   }
   if (isRefusal(outcome)) {
-    await deps.audit({ ...auditBase, outcome: "refused", code: outcome.code }).catch(() => undefined);
+    // Where the user's held links sit is kept, not only in the reply.
+    const heldLinks = Array.isArray(outcome.heldLinks)
+      ? { heldLinks: outcome.heldLinks as NonNullable<AgentWorktreeAuditEntry["heldLinks"]> }
+      : {};
+    await deps.audit({ ...auditBase, outcome: "refused", code: outcome.code, ...heldLinks }).catch(() => undefined);
     return outcome;
   }
   // A retry that saved a newer ref (only the branch was left) replaces what
@@ -3552,6 +3865,7 @@ export async function removeAgentWorktree(
       ...auditBase,
       outcome: "removed",
       recoveryRef: typeof outcome.recoveryRef === "string" ? outcome.recoveryRef : null,
+      ...(Array.isArray(outcome.links) ? { links: outcome.links as NonNullable<AgentWorktreeAuditEntry["links"]> } : {}),
     })
     .catch(() => undefined);
   return outcome;
@@ -3628,6 +3942,7 @@ async function removeLocked(
   const { deps, scope } = ctx;
   const repo = scope.repoCwd;
   const branch = workspace.copyBranch!.branch;
+  let removedLinks: Array<{ path: string; text: string }> = [];
   const latestState = await deps.loadState();
   // A removal Studio did not finish may have left a folder aside: it goes
   // back first, and the unlocked check, which may have seen it gone, is
@@ -3758,11 +4073,13 @@ async function removeLocked(
           (await changedWhileAside(recheckCtx, stillListed, realBefore, aside, before)) ?? archiveFrom(aside),
       },
     });
+    // Held links are listed apart from the message, which may be cut.
+    const heldLinks = !removed.ok && removed.held?.length ? { heldLinks: removed.held } : {};
     if (!removed.ok && archiveError) {
-      return refusal("WORKTREE_ARCHIVE_FAILED", archiveError, { workspaceId: workspace.id, recoveryRef });
+      return refusal("WORKTREE_ARCHIVE_FAILED", archiveError, { workspaceId: workspace.id, recoveryRef, ...heldLinks });
     }
     if (!removed.ok && removed.changed) {
-      return refusal("WORKTREE_CHANGED", removed.error, { workspaceId: workspace.id, recoveryRef });
+      return refusal("WORKTREE_CHANGED", removed.error, { workspaceId: workspace.id, recoveryRef, ...heldLinks });
     }
     if (!removed.ok) {
       // The recovery ref stays. git deletes files before it gives up on one
@@ -3773,8 +4090,13 @@ async function removeLocked(
         workspaceId: workspace.id,
         path: workspace.cwd,
         recoveryRef,
+        ...heldLinks,
       });
     }
+    // The user's own node_modules links went with it: what each read is
+    // said, and kept in the audit log.
+    removedLinks = removed.links ?? [];
+    for (const link of removedLinks) warnings.push(`the link ${link.path} (to ${cleanText(link.text, 200)}) went with it`);
   } else {
     const dropped = await dropMissingWorktreeRegistration(repo, workspace.cwd);
     if (!dropped.ok) warnings.push(`the stale worktree registration was kept: ${cleanText(dropped.error, 200)}`);
@@ -3913,6 +4235,7 @@ async function removeLocked(
     ...(recoveryRef ? { recoveryRef } : {}),
     ...(recoverWith ? { recoverWith } : {}),
     ...(archived ? { archived } : {}),
+    ...(removedLinks.length ? { links: removedLinks } : {}),
     ...(warnings.length ? { warnings } : {}),
   };
 }
@@ -4253,6 +4576,9 @@ export function createWorktreeAuditLog(
       recoveryRef: entry.recoveryRef ?? null,
       ...(entry.givenUp ? { givenUp: { pr: entry.givenUp.pr, remoteCommit: entry.givenUp.remoteCommit } } : {}),
       ...(entry.message ? { message: cleanText(entry.message, 300) } : {}),
+      // Verbatim, every one: what a removed link read is the one record of it.
+      ...(entry.links?.length ? { links: entry.links.map((link) => ({ path: link.path, text: link.text })) } : {}),
+      ...(entry.heldLinks?.length ? { heldLinks: entry.heldLinks.map((link) => ({ path: link.path, held: link.held })) } : {}),
     });
     const write = chain.then(async () => {
       await fsp.mkdir(dirname(file), { recursive: true });
