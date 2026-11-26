@@ -77,7 +77,8 @@ async function main() {
     git(repo, ["add", "."]);
     git(repo, ["commit", "-q", "-m", "init"], dated);
     const tree = path.join(scratch, "trees", "quiet");
-    git(repo, ["worktree", "add", "-q", tree, "-b", "feature/quiet"]);
+    // Made 20 days ago, as its last commit: HEAD's reflog says when.
+    git(repo, ["worktree", "add", "-q", tree, "-b", "feature/quiet"], dated);
     const head = git(tree, ["rev-parse", "HEAD"]);
     const admin = path.join(repo, ".git", "worktrees", "quiet");
     // What a status or a fetch does with nobody there.
@@ -117,10 +118,10 @@ async function main() {
       fs.rmSync(path.join(tree, "docs"), { recursive: true });
       assert.equal(days(await inspect.lastWorkAt(tree, withDocs, repo, null)), 0, "a deleted folder");
       git(tree, ["checkout", "-q", "--", "docs"]);
-      git(tree, ["reset", "-q", "--hard", head]);
+      git(tree, ["reset", "-q", "--hard", head], dated);
     });
 
-    await check("round 5: a file whose mode changed today is work, however old its contents", async () => {
+    await check("a file whose mode changed today is work, however old its contents", async () => {
       fs.writeFileSync(path.join(tree, "run.sh"), "echo hi\n");
       git(tree, ["add", "run.sh"]);
       git(tree, ["commit", "-q", "-m", "script"], dated);
@@ -132,7 +133,47 @@ async function main() {
       // Only the mode moved: its mtime is still 20 days old.
       assert.equal(days(fs.statSync(path.join(tree, "run.sh")).mtimeMs), 20);
       assert.equal(days(await inspect.lastWorkAt(tree, withScript, repo, null)), 0, "the chmod is work today");
+      git(tree, ["reset", "-q", "--hard", head], dated);
+    });
+
+    await check("made today on an old commit, or moved back to one, is work today", async () => {
+      const fresh = path.join(scratch, "trees", "fresh");
+      git(repo, ["worktree", "add", "-q", fresh, "-b", "feature/fresh", head]);
+      assert.equal(days(await inspect.lastWorkAt(fresh, head, repo, null)), 0, "made today");
+      git(tree, ["commit", "-q", "--allow-empty", "-m", "later"], dated);
       git(tree, ["reset", "-q", "--hard", head]);
+      assert.equal(days(await inspect.lastWorkAt(tree, head, repo, null)), 0, "reset today");
+      git(tree, ["reset", "-q", "--hard", head], dated);
+      assert.equal(days(await inspect.lastWorkAt(tree, head, repo, null)), 20);
+    });
+
+    await check("a changed file read from a folder below the top is still found", async () => {
+      fs.mkdirSync(path.join(tree, "src"));
+      fs.writeFileSync(path.join(tree, "src", "keep.txt"), "x\n");
+      git(tree, ["add", "src"]);
+      git(tree, ["commit", "-q", "-m", "src"], dated);
+      const withSrc = git(tree, ["rev-parse", "HEAD"]);
+      fs.utimesSync(path.join(tree, "src"), old, old);
+      fs.utimesSync(path.join(tree, "src", "keep.txt"), old, old);
+      fs.writeFileSync(path.join(tree, "README.md"), "# edited at the top\n");
+      assert.equal(days(await inspect.lastWorkAt(path.join(tree, "src"), withSrc, repo, null)), 0);
+      git(tree, ["reset", "-q", "--hard", head], dated);
+    });
+
+    await check("a repository inside it is unknown: git does not list what changed in it", async () => {
+      const inner = path.join(tree, "scratch");
+      execFileSync("git", ["init", "-q", inner]);
+      fs.writeFileSync(path.join(inner, "w.txt"), "x\n");
+      git(inner, ["add", "."]);
+      git(inner, ["commit", "-q", "-m", "inner"], dated);
+      fs.utimesSync(inner, old, old);
+      assert.equal(await inspect.lastWorkAt(tree, head, repo, null), null);
+      // Read from a folder below the top: git still names it from the top.
+      fs.mkdirSync(path.join(tree, "below"));
+      assert.equal(await inspect.lastWorkAt(path.join(tree, "below"), head, repo, null), null, "from below the top");
+      fs.rmSync(path.join(tree, "below"), { recursive: true });
+      fs.rmSync(inner, { recursive: true, force: true });
+      assert.equal(days(await inspect.lastWorkAt(tree, head, repo, null)), 20);
     });
 
     await check("what it cannot read is unknown, never an old guess", async () => {

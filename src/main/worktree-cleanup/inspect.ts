@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, promises as fsp } from "node:fs";
+import { existsSync, promises as fsp, type Stats } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { isRemotePath } from "@shared/remote";
 import { isDefaultTabTitle } from "@shared/tab-default-titles";
@@ -838,18 +838,24 @@ export async function lastActivity(path: string, head: string | null, root: stri
   return times.length ? Math.max(...times) : null;
 }
 
+// "gone" only for a path that is not there; any other error is null.
+async function lstatOrGone(at: string): Promise<Stats | "gone" | null> {
+  return fsp.lstat(at).catch((err: NodeJS.ErrnoException) => (err.code === "ENOENT" || err.code === "ENOTDIR" ? "gone" : null));
+}
+
 // More changed files than this and their times are not read one by one.
 const WORK_PATHS_READ = 200;
 
 /**
  * When someone last worked in it, for "idle N days", the rail's 7-day stale
- * rule and the advice: its last commit, the newest file git lists as
- * changed or new, and the last turn of an agent in it. Not git's own index,
- * logs/HEAD and HEAD, which a status or a fetch rewrites with nobody there;
- * the rules that hold a removal right after a touch keep those
- * (lastActivity). Anything it cannot read (the status, the commit, a
- * changed file, too many changed files) is null: unknown, so nothing reads
- * as idle on a guess.
+ * rule and the advice: its last commit, the last move of its HEAD (made,
+ * checked out, reset), the newest file git lists as changed or new, and the
+ * last turn of an agent in it. Not the times of git's own index, logs/HEAD
+ * and HEAD files, which a status or a fetch rewrites with nobody there; the
+ * rules that hold a removal right after a touch keep those (lastActivity).
+ * Anything it cannot read (the status, the commit, a changed file, too
+ * many changed files, a submodule or a repository inside it) is null:
+ * unknown, so nothing reads as idle on a guess.
  */
 export async function lastWorkAt(
   path: string,
@@ -871,15 +877,25 @@ export async function lastWorkAt(
     if (!Number.isFinite(seconds) || seconds <= 0) return null;
     times.push(seconds * 1000);
   }
+  // Made today on an old commit, or checked out or reset since: the time of
+  // HEAD's newest reflog entry, which a status or a fetch never adds.
+  const moved = /@\{(\d+)\}$/.exec(await readGitText(path, ["log", "-g", "-1", "--format=%gd", "--date=unix", "HEAD"]));
+  if (moved) times.push(Number(moved[1]) * 1000);
+  // git names changed paths from the top of the worktree.
+  const top = paths.length ? await readGitText(path, ["rev-parse", "--show-toplevel"]) : path;
+  if (!top) return null;
   for (const entry of paths) {
+    let at = join(top, entry);
+    let stat = await lstatOrGone(at);
+    // A submodule or a repository inside it: git lists the folder, not what
+    // changed in it, and the folder's own time does not tell.
+    if (stat && stat !== "gone" && stat.isDirectory()) return null;
     // A deleted file or folder leaves the time of the nearest folder still there.
-    let at = join(path, entry);
-    let stat = await fsp.lstat(at).catch(() => null);
-    while (!stat && at.length > path.length) {
+    while (stat === "gone" && at.length > top.length) {
       at = dirname(at);
-      stat = await fsp.lstat(at).catch(() => null);
+      stat = await lstatOrGone(at);
     }
-    if (!stat) return null;
+    if (!stat || stat === "gone") return null;
     // A chmod or a rename moves only ctime.
     times.push(Math.max(stat.mtimeMs, stat.ctimeMs));
   }
