@@ -114,6 +114,9 @@ export interface WorktreeCleanupDeps {
   // How long a pane has had no input or output, in ms; null when it cannot
   // say. Absent or null: never idle.
   paneIdleMs?(paneId: string): number | null;
+  // When an agent in one of these workspaces, or working in one of these
+  // folders, last had a turn (now while one runs); null when none did.
+  lastAgentTurnAt?(workspaceIds: readonly string[], dirs: readonly string[]): number | null;
   // Where the ignored files of a removed worktree are kept. Absent: they are
   // not kept, so a removal that would delete them is asked about.
   archiveRoot?(): string;
