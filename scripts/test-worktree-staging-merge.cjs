@@ -3,7 +3,7 @@
 // head, only while that branch on the remote still holds the merge, and the
 // removal asks the remote again right before deleting the folder
 // (src/main/worktree-cleanup/inspect.ts mergeFacts and
-// longLivedTargetStillHolds, merged-pull-request-stack.ts, remove.ts).
+// longLivedTargetRefusal, merged-pull-request-stack.ts, remove.ts).
 // Throwaway repositories with a bare remote, in the system temp folder.
 const assert = require("node:assert/strict");
 const { execFileSync } = require("node:child_process");
@@ -169,20 +169,38 @@ async function main() {
       const onStaging = { name: "origin/staging", commit: git(repo, ["rev-parse", "origin/staging"]) };
       const facts = await inspect.mergeFacts(repoContext([pr21]), siteTip, "feat/site", onStaging);
       assert.equal(facts.state, "merged");
-      assert.equal(await inspect.longLivedTargetStillHolds(repo, facts, "origin/main"), true);
+      const ask = (merge) => inspect.longLivedTargetRefusal(repo, merge, "origin/main");
+      assert.equal(await ask(facts), null);
       rewindStaging();
-      assert.equal(await inspect.longLivedTargetStillHolds(repo, facts, "origin/main"), false, "rewound since the check");
+      assert.equal(await ask(facts), "staging on origin no longer holds the merge.", "rewound since the check");
       restoreStaging();
-      assert.equal(await inspect.longLivedTargetStillHolds(repo, facts, "origin/main"), true);
+      assert.equal(await ask(facts), null);
       // Judged by the local staging label: origin's staging all the same.
       const local = { state: "merged", proof: "ancestor", target: "staging", targetCommit: facts.targetCommit };
-      assert.equal(await inspect.longLivedTargetStillHolds(repo, local, "origin/main"), true);
-      assert.equal(await inspect.longLivedTargetStillHolds(repo, { ...local, targetCommit: undefined }, "origin/main"), false, "no commit to ask about");
+      assert.equal(await ask(local), null);
+      assert.match((await ask({ ...local, targetCommit: undefined })) ?? "", /names no commit of origin's/, "no commit to ask about");
       rewindStaging();
-      assert.equal(await inspect.longLivedTargetStillHolds(repo, local, "origin/main"), false);
+      assert.equal(await ask(local), "staging on origin no longer holds the merge.");
       restoreStaging();
       const onMainFacts = { state: "merged", proof: "ancestor", target: "origin/main", targetCommit: main };
-      assert.equal(await inspect.longLivedTargetStillHolds(repo, onMainFacts, "origin/main"), true, "the default branch is not asked");
+      assert.equal(await ask(onMainFacts), null, "the default branch is not asked");
+      // Each other reason is said as it is, and keeps the folder all the same.
+      const url = git(repo, ["remote", "get-url", "origin"]);
+      git(repo, ["remote", "set-url", "origin", path.join(scratch, "no-such-remote.git")]);
+      try {
+        assert.equal(await ask(facts), "origin did not say where staging is now.");
+      } finally {
+        git(repo, ["remote", "set-url", "origin", url]);
+      }
+      const before = git(hub, ["rev-parse", "HEAD"]);
+      commitFile(hub, "unfetched.txt", "new\n", "not fetched here");
+      git(hub, ["push", "-q", "origin", "staging"]);
+      try {
+        assert.equal(await ask(facts), "staging on origin has commits not fetched here: fetch, then try again.");
+      } finally {
+        git(hub, ["reset", "-q", "--hard", before]);
+        restoreStaging();
+      }
     });
 
     await check("a squash found in origin's staging names the commit it was found in", async () => {
@@ -204,7 +222,7 @@ async function main() {
       const facts = await inspect.mergeFacts(repoContext([]), squashTip, "feat/squash", { name: "origin/staging", commit: tracked });
       assert.deepEqual([facts.state, facts.proof, facts.targetCommit], ["merged", "content-in-target", live], JSON.stringify(facts));
       rewindStaging();
-      assert.equal(await inspect.longLivedTargetStillHolds(repo, facts, "origin/main"), false, "rewound past the squash");
+      assert.match((await inspect.longLivedTargetRefusal(repo, facts, "origin/main")) ?? "", /staging on origin no longer holds the merge/, "rewound past the squash");
       restoreStaging();
       git(repo, ["worktree", "remove", "--force", squash]);
     });
@@ -272,7 +290,7 @@ async function main() {
         restoreStaging();
       }
       assert.notEqual(outcome.status, "removed", JSON.stringify(outcome));
-      assert.match(outcome.message ?? "", /origin\/staging on origin no longer holds the merge/, JSON.stringify(outcome));
+      assert.equal(outcome.message, "staging on origin no longer holds the merge. So it was put back.", JSON.stringify(outcome));
       assert.equal(fs.readFileSync(path.join(site, "page.html"), "utf8"), "<p>two</p>\n", "the folder is back with its files");
       assert.equal(git(site, ["rev-parse", "HEAD"]), siteTip);
     });
@@ -282,6 +300,32 @@ async function main() {
       const outcome = await removeIt(site, entry.fingerprint);
       assert.equal(outcome.status, "removed", JSON.stringify(outcome));
       assert.equal(fs.existsSync(site), false);
+    });
+    await check("a folder already gone keeps its branch when staging lost the merge right before", async () => {
+      const gone = path.join(trees, "site-gone");
+      git(repo, ["worktree", "add", "-q", gone, "feat/site"]);
+      fs.rmSync(gone, { recursive: true, force: true });
+      const entry = await checkOf(gone);
+      assert.equal(entry.merge.state, "merged", JSON.stringify(entry.merge));
+      let outcome;
+      try {
+        outcome = (
+          await removeMod.removeCleanupWorktrees(
+            deps,
+            {
+              items: [{ repoRoot: repo, path: gone, fingerprint: entry.fingerprint, confirmDirty: false, confirmUnmerged: false }],
+              deleteMergedBranches: true,
+            },
+            // After the last check, before the registration and branch go.
+            { beforeRemove: async () => (rewindStaging(), null) },
+          )
+        ).outcomes[0];
+      } finally {
+        restoreStaging();
+      }
+      assert.equal(outcome.status, "already-removed", JSON.stringify(outcome));
+      assert.equal(outcome.branchKept, "unmerged", JSON.stringify(outcome));
+      assert.equal(git(repo, ["rev-parse", "refs/heads/feat/site"]), siteTip, "the branch stays");
     });
   } finally {
     for (const file of outputs) fs.rmSync(file, { force: true });

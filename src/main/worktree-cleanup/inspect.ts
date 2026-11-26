@@ -261,22 +261,25 @@ function liveRemoteHead(root: string, branch: string): Promise<string | null> {
 
 /**
  * For a merge proved in a long-lived branch other than the default
- * (staging), which some repositories reset: whether origin still holds the
- * commit the proof was made against. Asked again right before deletion; no
- * answer is a no. Any other proof is unchanged by this.
+ * (staging), which some repositories reset: why origin may no longer hold
+ * the commit the proof was made against, or null when it still does. Asked
+ * again right before deletion; no answer keeps the folder. Any other proof
+ * is unchanged by this.
  */
-export async function longLivedTargetStillHolds(
+export async function longLivedTargetRefusal(
   root: string,
   merge: Pick<MergeFacts, "state" | "target" | "targetCommit">,
   defaultBranch: string | null,
-): Promise<boolean> {
-  if (merge.state !== "merged" || !merge.target) return true;
+): Promise<string | null> {
+  if (merge.state !== "merged" || !merge.target) return null;
   // origin/staging or the local staging it was judged by: origin's either way.
   const name = merge.target.startsWith("origin/") ? merge.target.slice("origin/".length) : merge.target;
-  if (!PROTECTED_BRANCHES.has(name) || name === (defaultBranch ? shortBranch(defaultBranch) : null)) return true;
+  if (!PROTECTED_BRANCHES.has(name) || name === (defaultBranch ? shortBranch(defaultBranch) : null)) return null;
+  if (!merge.targetCommit) return `The merge into ${name} names no commit of origin's to check again.`;
   const live = await liveRemoteHead(root, name);
-  if (!live || !merge.targetCommit || !(await revParse(root, `${live}^{commit}`))) return false;
-  return isAncestor(root, merge.targetCommit, live);
+  if (!live) return `origin did not say where ${name} is now.`;
+  if (!(await revParse(root, `${live}^{commit}`))) return `${name} on origin has commits not fetched here: fetch, then try again.`;
+  return (await isAncestor(root, merge.targetCommit, live)) ? null : `${name} on origin no longer holds the merge.`;
 }
 
 interface WorktreeListing {
