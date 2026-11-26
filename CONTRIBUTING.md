@@ -134,7 +134,10 @@ allowlist its own finding anyway.
 - CI runs the four typechecks, a build and every unit suite on macOS
   (`.github/workflows/ci.yml`), the build, every unit suite and an e2e smoke
   set on Linux (`ci-linux.yml`), and the bundle budgets (`budgets.yml`).
-  Keep them green.
+  Keep them green. On a draft pull request these three skip their jobs:
+  push to a draft freely and mark it ready when the work is done, which
+  starts them. A newer push cancels the older run. `Gitleaks` and
+  `PR hygiene` run on drafts too.
 - Keep it small. `PR hygiene` (`scripts/check-pr-hygiene.cjs`) counts the
   added and deleted lines, leaving out lockfiles and `docs/`: above 800 it
   warns, above 2,000 it fails unless the pull request has the `large-pr`

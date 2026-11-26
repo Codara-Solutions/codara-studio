@@ -7,14 +7,16 @@ name: Budgets
 on:
   pull_request:
     branches: [main]
+    # A draft runs nothing: the job is skipped until ready_for_review.
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
   workflow_dispatch:
 
 concurrency:
-  group: budgets-${{ github.event.pull_request.number || github.ref }}
-  # A newer push to a pull request replaces its run; every commit on main
-  # keeps its own result.
+  # A newer push to a pull request replaces its run. Every other run (main,
+  # dispatch) is its own group, so none is cancelled or dropped from a queue.
+  group: budgets-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -22,6 +24,7 @@ permissions:
 
 jobs:
   budgets:
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
