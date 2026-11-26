@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { existsSync, promises as fsp } from "node:fs";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { existsSync, promises as fsp, type Stats } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { isRemotePath } from "@shared/remote";
 import { isDefaultTabTitle } from "@shared/tab-default-titles";
 import type { AppState, CopyBranchCreator, RunState, Workspace } from "@shared/types";
@@ -43,9 +43,9 @@ import {
   resolveMergeDefaultBranch,
 } from "../git-worktrees";
 import { proveByMergedPullRequestStack } from "../merged-pull-request-stack";
-import { isKeptBranch } from "./kept-branches";
+import { isKeptBranch, PROTECTED_BRANCHES } from "./kept-branches";
 import type { LeftoverSystem } from "./leftovers";
-import { setupProvidedEntries } from "../worktree-setup/links";
+import { isDependencyLink, setupProvidedEntries } from "../worktree-setup/links";
 import { folderIdentity } from "../worktree-folders";
 
 // Facts about every worktree of the repositories behind the user's
@@ -114,6 +114,9 @@ export interface WorktreeCleanupDeps {
   // How long a pane has had no input or output, in ms; null when it cannot
   // say. Absent or null: never idle.
   paneIdleMs?(paneId: string): number | null;
+  // When an agent in one of these workspaces, or working in one of these
+  // folders, last had a turn (now while one runs); null when none did.
+  lastAgentTurnAt?(workspaceIds: readonly string[], dirs: readonly string[]): number | null;
   // Where the ignored files of a removed worktree are kept. Absent: they are
   // not kept, so a removal that would delete them is asked about.
   archiveRoot?(): string;
@@ -240,19 +243,46 @@ function remoteHead(repo: RepoContext, branch: string): Promise<string | null> {
   repo.remoteHeads ??= new Map();
   let pending = repo.remoteHeads.get(branch);
   if (!pending) {
-    pending = runGit(repo.root, ["ls-remote", "--heads", "--end-of-options", "origin", `refs/heads/${branch}`], {
-      timeout: LS_REMOTE_TIMEOUT_MS,
-    }).then(
-      ({ stdout }) => {
-        const line = stdout.split(/\r?\n/).find((entry) => entry.endsWith(`\trefs/heads/${branch}`));
-        const oid = line?.split("\t")[0]?.trim().toLowerCase() ?? "";
-        return /^[0-9a-f]{40,64}$/.test(oid) ? oid : null;
-      },
-      () => null,
-    );
+    pending = liveRemoteHead(repo.root, branch);
     repo.remoteHeads.set(branch, pending);
   }
   return pending;
+}
+
+function liveRemoteHead(root: string, branch: string): Promise<string | null> {
+  return runGit(root, ["ls-remote", "--heads", "--end-of-options", "origin", `refs/heads/${branch}`], {
+    timeout: LS_REMOTE_TIMEOUT_MS,
+  }).then(
+    ({ stdout }) => {
+      const line = stdout.split(/\r?\n/).find((entry) => entry.endsWith(`\trefs/heads/${branch}`));
+      const oid = line?.split("\t")[0]?.trim().toLowerCase() ?? "";
+      return /^[0-9a-f]{40,64}$/.test(oid) ? oid : null;
+    },
+    () => null,
+  );
+}
+
+/**
+ * For a merge proved in a long-lived branch other than the default
+ * (staging), which some repositories reset: why origin may no longer hold
+ * the commit the proof was made against, or null when it still does. Asked
+ * again right before deletion; no answer keeps the folder. Any other proof
+ * is unchanged by this.
+ */
+export async function longLivedTargetRefusal(
+  root: string,
+  merge: Pick<MergeFacts, "state" | "target" | "targetCommit">,
+  defaultBranch: string | null,
+): Promise<string | null> {
+  if (merge.state !== "merged" || !merge.target) return null;
+  // origin/staging or the local staging it was judged by: origin's either way.
+  const name = merge.target.startsWith("origin/") ? merge.target.slice("origin/".length) : merge.target;
+  if (!PROTECTED_BRANCHES.has(name) || name === (defaultBranch ? shortBranch(defaultBranch) : null)) return null;
+  if (!merge.targetCommit) return `The merge into ${name} names no commit of origin's to check again.`;
+  const live = await liveRemoteHead(root, name);
+  if (!live) return `origin did not say where ${name} is now.`;
+  if (!(await revParse(root, `${live}^{commit}`))) return `${name} on origin has commits not fetched here: fetch, then try again.`;
+  return (await isAncestor(root, merge.targetCommit, live)) ? null : `${name} on origin no longer holds the merge.`;
 }
 
 interface WorktreeListing {
@@ -718,11 +748,31 @@ export async function mergeFacts(
   if (branch && (branch === shortBranch(target.name) || branch === target.name)) return { state: "base", ...base };
   const { ahead, behind } = await aheadBehind(repo.root, target.commit, head);
   const facts = { ...base, ahead, behind };
-  if (ahead === 0 && (await isAncestor(repo.root, head, target.commit))) return { state: "merged", proof: "ancestor", ...facts };
+  const fallback = repo.base;
+  const defaultShort = fallback ? shortBranch(fallback.name) : null;
+  // Only as origin has it now: a stale tracking ref may still hold a merge
+  // the branch lost (deleted unmerged, force-pushed). Its commit must be
+  // here too, or the merge cannot be found in it.
+  const liveCommit = async (name: string): Promise<string | null> => {
+    const now = await remoteHead(repo, name);
+    return now && (await revParse(repo.root, `${now}^{commit}`)) ? now : null;
+  };
+  // A long-lived branch other than the default (staging, release), which
+  // some repositories reset: judged only as origin has it now.
+  const targetShort = target.name.startsWith("origin/") ? target.name.slice("origin/".length) : target.name;
+  const longLivedTarget = PROTECTED_BRANCHES.has(targetShort) && targetShort !== defaultShort;
+  // What the target holds for the proofs below that read its content.
+  const judged = longLivedTarget ? await liveCommit(targetShort) : target.commit;
+  // A proof read from it names the commit it was made against, which the
+  // removal asks origin about again.
+  const judgedFacts = async () =>
+    judged && judged !== target.commit ? { target: target.name, targetCommit: judged, ...(await aheadBehind(repo.root, judged, head)) } : facts;
+  if (judged && (longLivedTarget || ahead === 0) && (await isAncestor(repo.root, head, judged))) {
+    return { state: "merged", proof: "ancestor", ...(await judgedFacts()) };
+  }
   // A base that is not the default branch (a stacked pull request's branch,
   // often deleted once merged) can lag behind where the work went. The
   // default branch, as the remote has it, counts as well.
-  const fallback = repo.base;
   const onDefault = Boolean(fallback && branch && (branch === shortBranch(fallback.name) || branch === fallback.name));
   if (fallback && !onDefault && fallback.commit !== target.commit && (await isAncestor(repo.root, head, fallback.commit))) {
     const counts = await aheadBehind(repo.root, fallback.commit, head);
@@ -745,23 +795,22 @@ export async function mergeFacts(
     // their merges. A base on another remote (upstream/feat/x, a fork) gives
     // no such proof: its feat/x is not the branch the pull request merged into.
     const ownBase = !targetIsRemote ? target.name : target.name.startsWith("origin/") ? target.name.slice("origin/".length) : null;
-    // Only as origin has it now: a stale tracking ref may still hold a merge
-    // the branch lost (deleted unmerged, force-pushed). Its commit must be
-    // here too, or the merge cannot be found in it.
-    const ownCommit = async (): Promise<string | null> => {
-      if (!ownBase) return null;
-      const now = await remoteHead(repo, ownBase);
-      return now && (await revParse(repo.root, `${now}^{commit}`)) ? now : null;
-    };
+    // A long-lived branch other than the default (staging, release) is where
+    // some repositories merge first. Its copy on origin now counts as well,
+    // the worktree's own base included, but only for a pull request whose
+    // head is exactly this tip: a folder with commits past what was merged,
+    // or one behind it, stays unmerged.
+    const longLived = new Set([...PROTECTED_BRANCHES].filter((name) => name !== defaultShort));
     for (const name of branches) {
       const stacked = await proveByMergedPullRequestStack({
         repo: repo.root,
         tip: head,
         branch: name,
         mergedFor: async (headName) => all.filter((pr) => pr.headRefName === headName),
-        landedBases: new Set(fallback ? [shortBranch(fallback.name)] : []),
+        landedBases: new Set(defaultShort ? [defaultShort] : []),
         defaultCommit: fallback?.commit ?? null,
-        remoteCommit: async (base) => (ownBase !== null && base === ownBase ? ownCommit() : null),
+        remoteCommit: async (base) => (base === ownBase || longLived.has(base) ? liveCommit(base) : null),
+        exactTipBases: longLived,
       });
       if (!stacked) continue;
       // Judged against where it landed, never a local-only base (the rail's
@@ -784,8 +833,8 @@ export async function mergeFacts(
       };
     }
   }
-  if ((await contentInTarget(repo.root, head, target.commit)) === true) {
-    return { state: "merged", proof: "content-in-target", ...facts };
+  if (judged && (await contentInTarget(repo.root, head, judged)) === true) {
+    return { state: "merged", proof: "content-in-target", ...(await judgedFacts()) };
   }
   return { state: "unmerged", ...facts };
 }
@@ -814,9 +863,43 @@ export function parseStatus(output: string): StatusCounts {
   return { tracked, untracked, raw: output };
 }
 
+const COLLAPSED_LINK_FOLDERS = 20;
+
+// An untracked node_modules link (isDependencyLink) is no one's work: the
+// removal takes the link out first, never what it points at. It is left out
+// of the counts and of the raw status a confirmation is tied to.
 export async function readStatus(path: string, untracked: "all" | "normal"): Promise<StatusCounts> {
   const { stdout } = await runGit(path, ["status", "--porcelain=v1", "-z", `--untracked-files=${untracked}`]);
-  return parseStatus(stdout);
+  const status = parseStatus(stdout);
+  const links = new Set<string>();
+  for (const entry of status.untracked) if (await isDependencyLink(path, entry)) links.add(entry);
+  // A new folder git lists as one entry (pkg/) that holds only such links,
+  // as each file under it shows: a few folders, so a big one costs no walk.
+  const folders = untracked === "normal" ? status.untracked.filter((entry) => entry.endsWith("/")) : [];
+  if (folders.length <= COLLAPSED_LINK_FOLDERS) {
+    for (const folder of folders) {
+      const inside = await runGit(path, ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", folder]).then(
+        (result) => parseStatus(result.stdout),
+        () => null,
+      );
+      if (!inside || inside.tracked.length || !inside.untracked.length || inside.untracked.length > COLLAPSED_LINK_FOLDERS) continue;
+      let onlyLinks = true;
+      for (const entry of inside.untracked) if (!(await isDependencyLink(path, entry))) onlyLinks = false;
+      if (onlyLinks) links.add(folder);
+    }
+  }
+  if (!links.size) return status;
+  const fields = stdout.split("\0");
+  const kept: string[] = [];
+  for (let i = 0; i < fields.length; i += 1) {
+    const field = fields[i];
+    const code = field.slice(0, 2);
+    if (code === "??" && links.has(field.slice(3))) continue;
+    kept.push(field);
+    // A rename or copy carries its old path in the next field.
+    if (field.length >= 4 && (code[0] === "R" || code[0] === "C") && i + 1 < fields.length) kept.push(fields[++i]);
+  }
+  return parseStatus(kept.join("\0"));
 }
 
 export async function lastActivity(path: string, head: string | null, root: string): Promise<number | null> {
@@ -831,6 +914,77 @@ export async function lastActivity(path: string, head: string | null, root: stri
   if (head) {
     const seconds = Number(await readGitText(root, ["log", "-1", "--format=%ct", head]));
     if (Number.isFinite(seconds) && seconds > 0) times.push(seconds * 1000);
+  }
+  return times.length ? Math.max(...times) : null;
+}
+
+// "gone" only for a path that is not there; any other error is null.
+async function lstatOrGone(at: string): Promise<Stats | "gone" | null> {
+  return fsp.lstat(at).catch((err: NodeJS.ErrnoException) => (err.code === "ENOENT" || err.code === "ENOTDIR" ? "gone" : null));
+}
+
+// More changed files than this and their times are not read one by one.
+const WORK_PATHS_READ = 200;
+
+/**
+ * When someone last worked in it, for "idle N days", the rail's 7-day stale
+ * rule and the advice: its last commit, the last move of its HEAD (made,
+ * checked out, reset), the newest file git lists as changed or new, and the
+ * last turn of an agent in it. Not the times of git's own index, logs/HEAD
+ * and HEAD files, which a status or a fetch rewrites with nobody there; the
+ * rules that hold a removal right after a touch keep those (lastActivity).
+ * Anything it cannot read (the status, the commit, a changed file, too
+ * many changed files, a submodule or a repository inside it) is null:
+ * unknown, so nothing reads as idle on a guess.
+ */
+export async function lastWorkAt(
+  path: string,
+  head: string | null,
+  root: string,
+  agentTurnAt: number | null,
+  status?: StatusCounts | null,
+): Promise<number | null> {
+  let changed = status === undefined ? await readStatus(path, "normal").catch(() => null) : status;
+  // A new folder is listed once, and editing a file inside it leaves the
+  // folder's time alone: list the files in it.
+  if (changed?.untracked.some((entry) => entry.endsWith("/"))) changed = await readStatus(path, "all").catch(() => null);
+  if (!changed) return null;
+  const paths = [...changed.tracked, ...changed.untracked];
+  if (paths.length > WORK_PATHS_READ) return null;
+  const times: number[] = agentTurnAt ? [agentTurnAt] : [];
+  if (head) {
+    const seconds = Number(await readGitText(root, ["log", "-1", "--format=%ct", head]));
+    if (!Number.isFinite(seconds) || seconds <= 0) return null;
+    times.push(seconds * 1000);
+  }
+  // Made today on an old commit, or checked out or reset since: the time of
+  // HEAD's newest reflog entry, which a status or a fetch never adds. A read
+  // that failed is unknown; an empty one (no reflog kept) is no move.
+  let reflog: string;
+  try {
+    reflog = (await runGit(path, ["log", "-g", "-1", "--format=%gd", "--date=unix", "HEAD"])).stdout.trim();
+  } catch {
+    return null;
+  }
+  const moved = /@\{(\d+)\}$/.exec(reflog);
+  if (moved) times.push(Number(moved[1]) * 1000);
+  // git names changed paths from the top of the worktree.
+  const top = paths.length ? await readGitText(path, ["rev-parse", "--show-toplevel"]) : path;
+  if (!top) return null;
+  for (const entry of paths) {
+    let at = join(top, entry);
+    let stat = await lstatOrGone(at);
+    // A submodule or a repository inside it: git lists the folder, not what
+    // changed in it, and the folder's own time does not tell.
+    if (stat && stat !== "gone" && stat.isDirectory()) return null;
+    // A deleted file or folder leaves the time of the nearest folder still there.
+    while (stat === "gone" && at.length > top.length) {
+      at = dirname(at);
+      stat = await lstatOrGone(at);
+    }
+    if (!stat || stat === "gone") return null;
+    // A chmod or a rename moves only ctime.
+    times.push(Math.max(stat.mtimeMs, stat.ctimeMs));
   }
   return times.length ? Math.max(...times) : null;
 }
@@ -978,6 +1132,7 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
     state: merge.state,
     ...(merge.proof ? { proof: merge.proof } : {}),
     ...(merge.target ? { target: merge.target } : {}),
+    ...(merge.state === "merged" && merge.targetCommit ? { targetCommit: merge.targetCommit } : {}),
     ...(merge.via ? { via: merge.via } : {}),
   };
   if (merge.state === "unmerged" || merge.state === "unknown") {
