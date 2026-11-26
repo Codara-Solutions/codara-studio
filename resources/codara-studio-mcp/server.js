@@ -273,7 +273,7 @@ const NOTIFY_TOOL = {
 const WORKSPACE_STATUS_TOOL = {
   name: "codara_workspace_status",
   description:
-    "Read (no arguments; every agent's note) or set your one-line note in Codara's rail until your tab closes. Codara shows your state (working, needs you, done); status is for older callers.",
+    "Read (no arguments: all notes here) or set your one-line note in Codara's rail, kept until your tab closes. Codara shows your state (working, needs you, done); status is for older callers.",
   inputSchema: {
     type: "object",
     properties: {
@@ -2307,7 +2307,7 @@ async function listedTools() {
 function buildInstructions() {
   const listed = new Set(baseTools().map((tool) => tool.name));
   const parts = [
-    "Codara Studio tools act in the running Codara desktop app, on this session's own workspace and chat: never pass ids for them. If Codara is closed, every call fails at once (offline): ask the user to open Codara, then retry; do not loop.",
+    "Codara Studio tools act in the running Codara app, on this session's own workspace and chat: never pass ids for them. If Codara is closed, every call fails at once (offline): ask the user to open Codara, then retry; do not loop.",
   ];
   if (listed.has("codara_open_file")) {
     parts.push(
@@ -2321,12 +2321,12 @@ function buildInstructions() {
   }
   if (listed.has("codara_notify_user")) {
     parts.push(
-      "When you finish a task that took more than a minute, or you are blocked waiting for the user, call codara_notify_user once with a one-line summary.",
+      "After a task that took over a minute, or when blocked waiting for the user, call codara_notify_user once with a one-line summary.",
     );
   }
   if (listed.has("codara_workspace_status")) {
     parts.push(
-      "Your line in the rail shows by itself whether you are working, need the user or are done. At each milestone add a one-line note to it with codara_workspace_status: what you are on, what is left or why you are blocked. For work in a worktree, yours or a subagent's, set worktree to its path: the note shows on that worktree's row, status in_review once its pull request is up, blocked when it needs the user.",
+      "Your line in the rail shows by itself whether you are working, need the user or are done. At each milestone add a one-line note to it with codara_workspace_status: what you are on, what is left or why you are blocked. For work in a worktree, yours or a subagent's, set worktree to its path: the note shows on its row, status in_review once its pull request is up, blocked when it needs the user.",
     );
   }
   if (listed.has("codara_preview_navigate")) {
@@ -2336,19 +2336,19 @@ function buildInstructions() {
     parts.push(...TOOL_REGISTRY.instructions);
     parts.push(
       (listed.has("codara_preview_chrome")
-        ? "For signed-in sites, or when the user asks, use their Chrome: codara_preview_chrome open (the tab joins this workspace's tab group). Local dev servers stay in the in-app browser. If Chrome is not connected, use the in-app browser or ask the user to connect the Codara extension (Settings, Browser). "
+        ? "For signed-in sites, or when the user asks, use their Chrome: codara_preview_chrome open (the tab joins this workspace's tab group). Use the in-app browser for local dev servers and whenever Chrome is not connected (ask the user to connect the Codara extension: Settings, Browser). "
         : "") +
         "Never launch a separate browser or Chrome window: no chrome-devtools-mcp, Playwright or puppeteer windows, no google-chrome or xdg-open from the shell.",
     );
   }
   if (listed.has("codara_preview_navigate") || listed.has("codara_terminal_create")) {
     parts.push(
-      "Give the tabs and terminals of one task the same group, a short task name; a name already in use in your workspace joins that group.",
+      "Give the tabs and terminals of one task the same group, a short task name; a name in use in your workspace joins that group.",
     );
   }
   if (listed.has("codara_terminal_run")) {
     parts.push(
-      "Terminals: codara_terminal_run for one command, codara_terminal_create for watchers (poll codara_terminal_read with since=<cursor>). You can read any pane but write only to your own.",
+      "Terminals: codara_terminal_run for one command, codara_terminal_create for watchers (poll codara_terminal_read with since=<cursor>). You can read any pane but write only to terminals you created.",
     );
   }
   if (listed.has("codara_terminal_servers")) {
@@ -2358,7 +2358,7 @@ function buildInstructions() {
   }
   if (listed.has("codara_session_start")) {
     parts.push(
-      "Sessions: hand work in another workspace, or work that should outlive you, to codara_session_start; the session can use its own subagents. codara_session_wait also returns on a timeout: wait in short steps. A session in needs_you waits for the user: tell them.",
+      "Sessions: hand work in another workspace, or work that should outlive you, to codara_session_start; it can use its own subagents. codara_session_wait also returns on a timeout: wait in short steps. A session in needs_you waits for the user: tell them.",
     );
   }
   if (listed.has("codara_session_search")) {
@@ -2368,12 +2368,12 @@ function buildInstructions() {
   }
   if (listed.has("codara_task_list")) {
     parts.push(
-      "Task list (TASKS.md, shared with other agents and the user): add work worth tracking with codara_task_add and done-when lines anyone can check; set dispatched when you start, verifying when you think it is done. Only the repo's checks close it; a red run returns it to dispatched: fix and verify again. Use needs_you with one plain sentence when only the user can decide. File what you notice but will not do with codara_inbox_add.",
+      "Task list (TASKS.md, shared with other agents and the user): when the user asks for work worth tracking, add it with codara_task_add and done-when lines anyone can check; set dispatched when you start, verifying when you think it is done. Only the repo's checks close it; a red run returns it to dispatched: fix and verify again. Use needs_you with one plain sentence when only the user can decide. File what you notice but will not do with codara_inbox_add.",
     );
   }
   if (listed.has("codara_worktree_create")) {
     parts.push(
-      "Worktrees: use codara_worktree_create, never git worktree add; for another repository, or one you hand to a background subagent, pass workspace (the user approves once). Work there with absolute paths or git -C. If its setup is not finished, call codara_worktree_setup with wait:true before building. Linked folders are shared with the main checkout: never install into or delete them. A setup awaiting-approval waits for the user to approve its commands; never run them, or the setup file's terminal commands, yourself. Once the branch is merged, call codara_worktree_remove; on a refusal act on its hint, do not retry. For a general cleanup use codara_worktree_cleanup.",
+      "Worktrees: use codara_worktree_create; for another repository, or one you hand to a background subagent, pass workspace (the user approves once) instead of running git worktree add. Work there with absolute paths or git -C. If its setup is not finished, call codara_worktree_setup with wait:true before building. Linked folders are shared with the main checkout: never install into or delete them. A setup in state awaiting-approval waits for the user to approve its commands; never run them, or the terminal commands in .codara/worktree.json, yourself. After the merge, call codara_worktree_remove; on a refusal act on its hint, do not retry. When the user wants a general cleanup, use codara_worktree_cleanup.",
     );
   }
   if (listed.has("codara_whiteboard_get") || listed.has("codara_board_get")) {

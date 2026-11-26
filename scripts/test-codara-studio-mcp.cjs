@@ -342,15 +342,15 @@ function sortedEqual(actual, expected, label) {
     // does it (the coordinator or its background subagent).
     assert.match(
       studio.init.instructions,
-      /codara_worktree_create, never git worktree add; for another repository, or one you hand to a background subagent, pass workspace/,
+      /for another repository, or one you hand to a background subagent, pass workspace .*instead of running git worktree add/,
       "an agent learns to make another repository's worktree through Codara",
     );
     assert.match(
       studio.init.instructions,
-      /set worktree to its path: the note shows on that worktree's row/,
+      /set worktree to its path: the note shows on its row/,
       "an agent learns where a subagent's milestone notes go",
     );
-    assert.match(studio.init.instructions, /awaiting-approval waits for the user to approve its commands; never run them, or the setup file's terminal commands, yourself/);
+    assert.match(studio.init.instructions, /awaiting-approval waits for the user to approve its commands; never run them, or the terminal commands in \.codara\/worktree\.json, yourself/);
     assert.match(
       studio.init.instructions,
       /Your line in the rail shows by itself whether you are working, need the user or are done\. At each milestone add a one-line note to it with codara_workspace_status/,
@@ -358,7 +358,7 @@ function sortedEqual(actual, expected, label) {
     );
     assert.match(
       studio.init.instructions,
-      /Task list .*codara_task_add.*Only the repo's checks close it.*needs_you with one plain sentence/,
+      /Task list .*when the user asks for work worth tracking, add it with codara_task_add.*Only the repo's checks close it.*needs_you with one plain sentence/,
       "a terminal agent learns that only the repo's checks close a task",
     );
     assert.match(
@@ -380,7 +380,8 @@ function sortedEqual(actual, expected, label) {
     // Agents use the user's own Chrome through the extension, in their
     // workspace's tab group, and never start a browser of their own.
     assert.match(studio.init.instructions, /use their Chrome: codara_preview_chrome open \(the tab joins this workspace's tab group\)/);
-    assert.match(studio.init.instructions, /Local dev servers stay in the in-app browser\. If Chrome is not connected/);
+    assert.match(studio.init.instructions, /in-app browser for local dev servers and whenever Chrome is not connected/);
+    assert.match(studio.init.instructions, /read any pane but write only to terminals you created/);
     assert.match(studio.init.instructions, /Never launch a separate browser or Chrome window: no chrome-devtools-mcp, Playwright or puppeteer windows, no google-chrome or xdg-open/);
     assert.notStrictEqual(studio.init.serverInfo.version, "0.1.0", "serverInfo reports Codara's version");
     const legacyClient = await listTools(undefined, {}, { protocolVersion: "2024-11-05" });
