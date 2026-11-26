@@ -1599,6 +1599,21 @@ async function main() {
   await shortTurn("fifth");
   check("idle clock: the folder the live session started in is credited", folder("/work/c") > movedEnd);
   T.sessions = new Map();
+  // A pane started under a symlinked folder: the clean-up asks by the
+  // resolved path, so that one is credited too.
+  const linkRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codara-tan-link-"));
+  const realTree = path.join(linkRoot, "real-tree");
+  const linkedTree = path.join(linkRoot, "linked-tree");
+  fs.mkdirSync(realTree);
+  fs.symlinkSync(realTree, linkedTree);
+  T.cwds.set("mover", linkedTree);
+  await sleep(60_000);
+  await shortTurn("linked");
+  check(
+    "idle clock: a folder reached through a link is credited by its resolved path",
+    folder(fs.realpathSync(realTree)) === folder(linkedTree) && folder(linkedTree) > movedEnd,
+  );
+  fs.rmSync(linkRoot, { recursive: true, force: true });
   // A prompt at startup, before any turn, is no work yet.
   mod.syncTerminalNotifyPanes({ workspaceId: "ws-prompt", panes: [
     { paneId: "prompt", tabId: "tq", tabTitle: "claude", excluded: false, runtimeHint: "claude" },

@@ -74,7 +74,9 @@ function save(now: number): void {
  * Keeps the times in `target` across restarts: reads what is there now
  * (newer times win) and writes each turn's start and end as they happen. A
  * file that is there but cannot be read raises the floor to when it was
- * last written.
+ * last written. No file yet (the first run of a build that keeps them): what
+ * agents did before is not known, so the floor is now, saved at once so a
+ * later start reads it back instead of starting over.
  */
 export function persistAgentTurns(target: string, now = Date.now()): void {
   file = target;
@@ -82,7 +84,9 @@ export function persistAgentTurns(target: string, now = Date.now()): void {
   try {
     raw = fs.readFileSync(target, "utf8");
   } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") lost(target, now);
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") return lost(target, now);
+    floor = Math.max(floor, now);
+    save(now);
     return;
   }
   let parsed: unknown = null;

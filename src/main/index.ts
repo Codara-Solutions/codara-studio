@@ -1347,6 +1347,10 @@ app.whenReady().then(async () => {
     console.error("[main] path enrichment failed:", err),
   );
 
+  // The worktree idle clock remembers agent turns across restarts; read
+  // before the agent socket can ask it.
+  persistAgentTurns(join(codaraHome(), "agent-turns.json"));
+
   // Start the JSON-RPC agent socket as early as possible so its env vars are
   // populated before pty-manager spawns its first session (user terminal or
   // worker pane). Failures here are non-fatal — Codara itself works without
@@ -1409,8 +1413,6 @@ app.whenReady().then(async () => {
       ),
     )
     .catch(() => undefined);
-  // The worktree idle clock remembers agent turns across restarts.
-  persistAgentTurns(join(codaraHome(), "agent-turns.json"));
   // One-time tidy-up after the retired "Active account in your terminal"
   // feature: delete the pointer symlinks and generated env.sh it kept under
   // <codara-home>/cli/active/. Once they are gone this is a no-op, and

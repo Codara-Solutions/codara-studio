@@ -1356,7 +1356,7 @@ export function noteTerminalHookEvent(
   if (hookCwd && path.isAbsolute(hookCwd)) {
     w.hookCwd = hookCwd;
     // Every folder it passes through, also between two stamps.
-    if (w.clockBusy) w.clockCwds.add(hookCwd);
+    if (w.clockBusy) addClockCwd(w.clockCwds, hookCwd);
   }
   if (w.clockBusy) stampWork(w, now, false);
   switch (hookName) {
@@ -2844,7 +2844,20 @@ function workCwds(w: PaneWatcher): string[] {
   } catch {
     // No session: the other folders.
   }
-  return [...cwds];
+  const resolved = new Set<string>();
+  for (const cwd of cwds) addClockCwd(resolved, cwd);
+  return [...resolved];
+}
+
+// A folder as spelled and as resolved through links: the clean-up compares
+// against resolved paths, the pane may know only a symlinked spelling.
+function addClockCwd(cwds: Set<string>, cwd: string): void {
+  cwds.add(cwd);
+  try {
+    cwds.add(fs.realpathSync(cwd));
+  } catch {
+    // Gone or unreadable: the spelling alone.
+  }
 }
 
 const CLOCK_STAMP_EVERY_MS = 10_000;

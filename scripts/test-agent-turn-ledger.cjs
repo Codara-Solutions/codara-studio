@@ -46,7 +46,7 @@ test("a turn's edge is on disk at once; a stamp inside a turn at most once a min
 
 test("times come back after a restart; an old time never replaces a newer one", ({ mod, temp }) => {
   const file = path.join(temp, "restart.json");
-  mod.persistAgentTurns(file, 5 * DAY);
+  mod.persistAgentTurns(file, DAY);
   mod.noteAgentTurn("ws-1", ["/work/a", "/work/b"], 2 * DAY, true);
   mod.__resetAgentTurnsForTests();
   assert.equal(mod.lastAgentTurnAt(inFolder("/work/a")), null, "a restart without the file forgets");
@@ -54,7 +54,7 @@ test("times come back after a restart; an old time never replaces a newer one", 
   mod.persistAgentTurns(file, 5 * DAY);
   assert.equal(mod.lastAgentTurnAt(inFolder("/work/a")), 2 * DAY);
   assert.equal(mod.lastAgentTurnAt(inFolder("/work/b")), 3 * DAY, "the newer time this run saw stays");
-  assert.equal(mod.lastAgentTurnAt(inFolder("/work/c")), null);
+  assert.equal(mod.lastAgentTurnAt(inFolder("/work/c")), DAY, "the floor of the file's first run, not the restart's");
   assert.equal(mod.lastAgentTurnAt((workspaceId) => workspaceId === "ws-1"), 3 * DAY);
 });
 
@@ -85,9 +85,17 @@ test("a saved file that cannot be read: nothing reads idle before it was last wr
   fs.utimesSync(file, written, written);
   mod.persistAgentTurns(file, 9 * DAY);
   assert.equal(mod.lastAgentTurnAt(inFolder("/work/any")), 4 * DAY, "a file of the wrong shape too");
+});
+
+test("no file yet: nothing reads idle before it began, and that start is kept once", ({ mod, temp }) => {
+  const file = path.join(temp, "first-run", "agent-turns.json");
+  // The first run of a build that keeps the times: agents worked before.
+  mod.persistAgentTurns(file, 9 * DAY);
+  assert.equal(mod.lastAgentTurnAt(inFolder("/work/any")), 9 * DAY, "before the file began is not known");
+  assert.equal(read(file).floor, 9 * DAY, "saved at once, before any turn");
   mod.__resetAgentTurnsForTests();
-  mod.persistAgentTurns(path.join(temp, "missing.json"), 9 * DAY);
-  assert.equal(mod.lastAgentTurnAt(inFolder("/work/any")), null, "no file yet is a fresh start");
+  mod.persistAgentTurns(file, 20 * DAY);
+  assert.equal(mod.lastAgentTurnAt(inFolder("/work/any")), 9 * DAY, "a later start reads it back, not its own time");
 });
 
 test("an entry ages out only past the longest idle span anyone asks about", ({ mod, temp }) => {
@@ -160,6 +168,12 @@ async function matcherTests(temp) {
     assert.equal(at("ws-a", "/elsewhere"), false, "a known folder elsewhere, even in the workspace");
     assert.equal(at("ws-a", null), true, "no folder known: by the workspace");
     assert.equal(at("ws-z", null), false);
+    // A folder asked about through a link, a turn recorded by its real path.
+    const real = fs.mkdtempSync(path.join(temp, "real-"));
+    const link = path.join(temp, `link-${process.pid}`);
+    fs.symlinkSync(real, link);
+    assert.equal(agentTurnIn([], [link])("ws-z", path.join(fs.realpathSync(real), "src")), true, "a folder asked about through a link");
+    assert.equal(agentTurnIn([], [path.join(temp, "gone")])("ws-z", path.join(temp, "gone")), true, "a folder that is gone, as spelled");
   } finally {
     fs.rmSync(outfile, { force: true });
   }
