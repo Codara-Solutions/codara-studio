@@ -27,6 +27,7 @@ import {
 } from "../agent-worktrees";
 import { deleteBranchIfAt } from "../git-branches";
 import { errorText, readGitText, runGit } from "../git-exec";
+import { heldText } from "../worktree-setup/links";
 import {
   dropMissingWorktreeRegistration,
   isRegisteredWorktree,
@@ -362,7 +363,11 @@ async function removeOne(
     status: "refused",
     branchDeleted: false,
   };
-  const audit = (result: "removed" | "refused", extra: { code?: string; recoveryRef?: string | null } = {}) =>
+  let removedLinks: Array<{ path: string; text: string }> | undefined;
+  const audit = (
+    result: "removed" | "refused",
+    extra: { code?: string; recoveryRef?: string | null; held?: Array<{ path: string; held: string }> } = {},
+  ) =>
     deps
       .audit({
         action: "remove",
@@ -378,6 +383,8 @@ async function removeOne(
         proof: check.merge.proof ?? null,
         blockers: check.blockers.map((entry) => entry.code),
         recoveryRef: extra.recoveryRef ?? null,
+        ...(removedLinks ? { links: removedLinks } : {}),
+        ...(extra.held?.length ? { heldLinks: extra.held } : {}),
       })
       .catch(() => undefined);
   const refuse = async (code: WorktreeCleanupOutcome["code"], message: string): Promise<RemovalWork> => {
@@ -492,20 +499,30 @@ async function removeOne(
         recheck: async (aside) => (await changedWhileAside(ctx, check, real, aside, before!, options)) ?? archiveFrom(aside),
       },
     });
+    // Every held link stays named: the message before them is cut, never
+    // they, however long the part before is.
+    const named = removed.ok ? "" : cleanText(heldText(removed.held ?? []), Infinity);
     if (!removed.ok && archiveError) {
-      await audit("refused", { code: "ARCHIVE_FAILED", recoveryRef });
-      return { outcome: { ...outcome, status: "refused", code: "ARCHIVE_FAILED", message: archiveError }, dropWorkspaces: [] };
+      await audit("refused", { code: "ARCHIVE_FAILED", recoveryRef, held: removed.held });
+      const message = [archiveError, named].filter(Boolean).join(" ");
+      return { outcome: { ...outcome, status: "refused", code: "ARCHIVE_FAILED", message }, dropWorkspaces: [] };
+    }
+    let failure = "";
+    if (!removed.ok) {
+      const error = cleanText(removed.error, Infinity);
+      const before = named && error.endsWith(named) ? error.slice(0, -named.length) : error;
+      failure = [cleanText(before, 400), named].filter(Boolean).join(" ");
     }
     if (!removed.ok && removed.changed) {
-      await audit("refused", { code: "CHANGED", recoveryRef });
-      return { outcome: { ...outcome, status: "refused", code: "CHANGED", message: cleanText(removed.error, 400) }, dropWorkspaces: [] };
+      await audit("refused", { code: "CHANGED", recoveryRef, held: removed.held });
+      return { outcome: { ...outcome, status: "refused", code: "CHANGED", message: failure }, dropWorkspaces: [] };
     }
     if (!removed.ok) {
       // The recovery refs stay. git deletes files before it gives up on
       // one it cannot delete, and it drops the worktree's registration even
       // then, so after a failure the refs may be the only copy of the last
       // commit and of the uncommitted work. They expire like the others.
-      await audit("refused", { code: "GIT_FAILED", recoveryRef });
+      await audit("refused", { code: "GIT_FAILED", recoveryRef, held: removed.held });
       const left = (await fsp.lstat(check.path).catch(() => null)) !== null;
       const partly = left && !(await isRegisteredWorktree(repo.root, check.path));
       return {
@@ -514,7 +531,7 @@ async function removeOne(
           status: "failed",
           code: "GIT_FAILED",
           message: [
-            cleanText(removed.error, 400),
+            failure,
             partly ? "git removed part of the folder; delete the rest by hand." : null,
             outcome.message ?? null,
           ]
@@ -528,6 +545,7 @@ async function removeOne(
       };
     }
     outcome.status = "removed";
+    if (removed.links) removedLinks = removed.links;
     if (archived) outcome.archived = archived;
   } else {
     const dropped = await dropMissingWorktreeRegistration(repo.root, check.path);

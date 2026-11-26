@@ -184,6 +184,10 @@ export interface AgentWorktreeAuditEntry {
   givenUp?: { pr: number; remoteCommit: string } | null;
   /** What the user was told, when a press ended before the removal. */
   message?: string | null;
+  /** The user's node_modules links that went with a removed folder, as each read. */
+  links?: Array<{ path: string; text: string }>;
+  /** The user's node_modules links a failed removal left held, and where. */
+  heldLinks?: Array<{ path: string; held: string }>;
 }
 
 export interface AgentWorktreeDeps {
@@ -3527,7 +3531,11 @@ export async function removeAgentWorktree(
     else throw err;
   }
   if (isRefusal(outcome)) {
-    await deps.audit({ ...auditBase, outcome: "refused", code: outcome.code }).catch(() => undefined);
+    // Where the user's held links sit is kept, not only in the reply.
+    const heldLinks = Array.isArray(outcome.heldLinks)
+      ? { heldLinks: outcome.heldLinks as NonNullable<AgentWorktreeAuditEntry["heldLinks"]> }
+      : {};
+    await deps.audit({ ...auditBase, outcome: "refused", code: outcome.code, ...heldLinks }).catch(() => undefined);
     return outcome;
   }
   // A retry that saved a newer ref (only the branch was left) replaces what
@@ -3552,6 +3560,7 @@ export async function removeAgentWorktree(
       ...auditBase,
       outcome: "removed",
       recoveryRef: typeof outcome.recoveryRef === "string" ? outcome.recoveryRef : null,
+      ...(Array.isArray(outcome.links) ? { links: outcome.links as NonNullable<AgentWorktreeAuditEntry["links"]> } : {}),
     })
     .catch(() => undefined);
   return outcome;
@@ -3628,6 +3637,7 @@ async function removeLocked(
   const { deps, scope } = ctx;
   const repo = scope.repoCwd;
   const branch = workspace.copyBranch!.branch;
+  let removedLinks: Array<{ path: string; text: string }> = [];
   const latestState = await deps.loadState();
   // A removal Studio did not finish may have left a folder aside: it goes
   // back first, and the unlocked check, which may have seen it gone, is
@@ -3758,11 +3768,13 @@ async function removeLocked(
           (await changedWhileAside(recheckCtx, stillListed, realBefore, aside, before)) ?? archiveFrom(aside),
       },
     });
+    // Held links are listed apart from the message, which may be cut.
+    const heldLinks = !removed.ok && removed.held?.length ? { heldLinks: removed.held } : {};
     if (!removed.ok && archiveError) {
-      return refusal("WORKTREE_ARCHIVE_FAILED", archiveError, { workspaceId: workspace.id, recoveryRef });
+      return refusal("WORKTREE_ARCHIVE_FAILED", archiveError, { workspaceId: workspace.id, recoveryRef, ...heldLinks });
     }
     if (!removed.ok && removed.changed) {
-      return refusal("WORKTREE_CHANGED", removed.error, { workspaceId: workspace.id, recoveryRef });
+      return refusal("WORKTREE_CHANGED", removed.error, { workspaceId: workspace.id, recoveryRef, ...heldLinks });
     }
     if (!removed.ok) {
       // The recovery ref stays. git deletes files before it gives up on one
@@ -3773,8 +3785,13 @@ async function removeLocked(
         workspaceId: workspace.id,
         path: workspace.cwd,
         recoveryRef,
+        ...heldLinks,
       });
     }
+    // The user's own node_modules links went with it: what each read is
+    // said, and kept in the audit log.
+    removedLinks = removed.links ?? [];
+    for (const link of removedLinks) warnings.push(`the link ${link.path} (to ${cleanText(link.text, 200)}) went with it`);
   } else {
     const dropped = await dropMissingWorktreeRegistration(repo, workspace.cwd);
     if (!dropped.ok) warnings.push(`the stale worktree registration was kept: ${cleanText(dropped.error, 200)}`);
@@ -3913,6 +3930,7 @@ async function removeLocked(
     ...(recoveryRef ? { recoveryRef } : {}),
     ...(recoverWith ? { recoverWith } : {}),
     ...(archived ? { archived } : {}),
+    ...(removedLinks.length ? { links: removedLinks } : {}),
     ...(warnings.length ? { warnings } : {}),
   };
 }
@@ -4253,6 +4271,9 @@ export function createWorktreeAuditLog(
       recoveryRef: entry.recoveryRef ?? null,
       ...(entry.givenUp ? { givenUp: { pr: entry.givenUp.pr, remoteCommit: entry.givenUp.remoteCommit } } : {}),
       ...(entry.message ? { message: cleanText(entry.message, 300) } : {}),
+      // Verbatim, every one: what a removed link read is the one record of it.
+      ...(entry.links?.length ? { links: entry.links.map((link) => ({ path: link.path, text: link.text })) } : {}),
+      ...(entry.heldLinks?.length ? { heldLinks: entry.heldLinks.map((link) => ({ path: link.path, held: link.held })) } : {}),
     });
     const write = chain.then(async () => {
       await fsp.mkdir(dirname(file), { recursive: true });
