@@ -86,6 +86,7 @@ import {
   noteHostResume,
   terminalAgentsMidTurn,
 } from "./terminal-agent-notify";
+import { flushAgentTurns, persistAgentTurns } from "./agent-turn-ledger";
 import { collectLiveWork, hasLiveWork, quitPromptText, type LiveWork } from "./quit-guard";
 import { busyTools } from "./agent-cli-updates/launch-guard";
 import { AGENT_CLI_LABELS } from "@shared/agent-cli-updates";
@@ -1346,6 +1347,10 @@ app.whenReady().then(async () => {
     console.error("[main] path enrichment failed:", err),
   );
 
+  // The worktree idle clock remembers agent turns across restarts; read
+  // before the agent socket can ask it.
+  persistAgentTurns(join(codaraHome(), "agent-turns.json"));
+
   // Start the JSON-RPC agent socket as early as possible so its env vars are
   // populated before pty-manager spawns its first session (user terminal or
   // worker pane). Failures here are non-fatal — Codara itself works without
@@ -2052,6 +2057,7 @@ app.on("before-quit", (event) => {
   }
   // Past the prompt this quit ends the process: a GPU exit is no crash now.
   gpuDrawingQuitGoingAhead("before-quit");
+  flushAgentTurns();
   // Flag the quit BEFORE anything else. Otherwise the async cleanup below
   // preventDefault()s this quit, then later re-calls app.quit() — and on that
   // second pass the window `close` handler would still see isQuitting === false

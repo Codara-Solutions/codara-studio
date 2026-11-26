@@ -116,7 +116,6 @@ export interface WorktreeCleanupDeps {
   paneIdleMs?(paneId: string): number | null;
   // When an agent in one of these workspaces, or working in one of these
   // folders, last had a turn (now while one runs); null when none did.
-  // Not connected in the app yet: absent, an agent's turn does not count.
   lastAgentTurnAt?(workspaceIds: readonly string[], dirs: readonly string[]): number | null;
   // Where the ignored files of a removed worktree are kept. Absent: they are
   // not kept, so a removal that would delete them is asked about.

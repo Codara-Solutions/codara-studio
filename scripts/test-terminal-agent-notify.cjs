@@ -39,7 +39,7 @@ const harnessPlugin = {
       path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
     }));
     build.onResolve(
-      { filter: /^(electron|\.\/pty-manager|\.\/notify|\.\/owned-process-tree|\.\/agent-session-registry|\.\/orchestration\/usage-activity-refresh)$/ },
+      { filter: /^(electron|\.\/pty-manager|\.\/notify|\.\/owned-process-tree|\.\/agent-session-registry|\.\/agent-turn-ledger|\.\/orchestration\/usage-activity-refresh)$/ },
       (args) => ({ path: args.path, namespace: "stub" }),
     );
     build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => {
@@ -49,6 +49,18 @@ const harnessPlugin = {
         return {
           contents: init + "export function latestSessionStart(id){ return globalThis.__TAN.sessions?.get(id) ?? null; }\n",
           loader: "js",
+        };
+      }
+      if (args.path === "./agent-turn-ledger") {
+        // The real ledger, with each note it is given recorded.
+        return {
+          contents:
+            init +
+            `import * as real from ${JSON.stringify(path.join(ROOT, "src/main/agent-turn-ledger.ts"))};\n` +
+            "export const lastAgentTurnAt = real.lastAgentTurnAt;\n" +
+            "export function noteAgentTurn(workspaceId, cwds, at, edge){ (globalThis.__TAN.turnNotes ??= []).push({ workspaceId, cwds: [...cwds], at, edge }); return real.noteAgentTurn(workspaceId, cwds, at, edge); }\n",
+          loader: "js",
+          resolveDir: ROOT,
         };
       }
       if (args.path === "./orchestration/usage-activity-refresh") {
@@ -84,6 +96,7 @@ const harnessPlugin = {
             "export function onExit(id, h){ globalThis.__TAN.exits.set(id, h); return () => globalThis.__TAN.exits.delete(id); }\n" +
             "export function readTailChunks(id){ return globalThis.__TAN.tails.get(id) ?? []; }\n" +
             "export function sessionPid(id){ return globalThis.__TAN.pids?.get(id) ?? null; }\n" +
+            "export function sessionCwd(id){ return globalThis.__TAN.cwds?.get(id) ?? null; }\n" +
             "export function sessionDimensions(id){ return globalThis.__TAN.dimensions?.get(id) ?? null; }\n" +
             "export function waitForSpawn(){ return Promise.resolve(true); }\n" +
             "export function write(id, data){ globalThis.__TAN.writes.push({ id, data }); }\n",
@@ -1470,6 +1483,7 @@ async function main() {
 
   // Claude clears its progress bar between two tool calls of one turn and
   // sets it again moments later; only a clear that holds ends the turn.
+  T.cwds = new Map([["progress", "/work/tree"]]);
   mod.syncTerminalNotifyPanes({ workspaceId: "ws-progress", panes: [
     { paneId: "progress", tabId: "tp", tabTitle: "claude", excluded: false, runtimeHint: "claude" },
   ] });
@@ -1485,6 +1499,130 @@ async function main() {
   feed("progress", "\x1b]9;4;0\x07");
   await sleep(1200);
   check("claude: a progress clear that holds announces the finish once", alertCount() === beforeProgress + 1);
+
+  // The worktree idle clock: a finished turn is not "now", and it outlives
+  // its pane, found by workspace or by the folder it ran in.
+  const inProgress = (workspaceId) => workspaceId === "ws-progress";
+  const inTree = (_workspaceId, cwd) => cwd === "/work/tree";
+  const endedAt = mod.terminalAgentLastTurnAt(inProgress);
+  check("idle clock: a finished turn is when it was", typeof endedAt === "number" && endedAt <= Date.now());
+  await sleep(60_000);
+  check("idle clock: an idle pane does not read as a turn now", mod.terminalAgentLastTurnAt(inProgress) === endedAt);
+  check("idle clock: found by the folder it ran in", mod.terminalAgentLastTurnAt(inTree) === endedAt);
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-progress", panes: [] });
+  check("idle clock: the turn outlives its closed pane", mod.terminalAgentLastTurnAt(inProgress) === endedAt);
+  check("idle clock: other workspaces see none of it", mod.terminalAgentLastTurnAt((id) => id === "ws-none") === null);
+  // Working reads as now; a pane closed mid-turn ends its turn at the close.
+  T.cwds.set("closing", "/work/other");
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-closing", panes: [
+    { paneId: "closing", tabId: "tc", tabTitle: "claude", excluded: false, runtimeHint: "claude" },
+  ] });
+  const inClosing = (workspaceId) => workspaceId === "ws-closing";
+  mod.noteTerminalUserInput("closing", "refactor the parser\r");
+  feed("closing", "\x1b]9;4;1;10\x07");
+  await sleep(1500);
+  check("idle clock: a turn that runs reads as now", mod.terminalAgentLastTurnAt(inClosing) === Date.now());
+  await sleep(3_000);
+  check("idle clock: still in its turn", mod.terminalAgentLastTurnAt(inClosing) === Date.now());
+  const closedAt = Date.now();
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-closing", panes: [] });
+  await sleep(60_000);
+  check("idle clock: a pane closed mid-turn ends the turn at the close", mod.terminalAgentLastTurnAt(inClosing) === closedAt);
+  // A long tool call changes no state: the turn is still stamped as it
+  // goes, so a crash in the middle loses seconds, not the whole turn.
+  T.cwds.set("long", "/work/long");
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-long", panes: [
+    { paneId: "long", tabId: "tl", tabTitle: "claude", excluded: false, runtimeHint: "claude" },
+  ] });
+  mod.noteTerminalUserInput("long", "run the whole suite\r");
+  feed("long", "\x1b]9;4;1;10\x07");
+  await sleep(1500);
+  const longStart = Date.now();
+  // Claude keeps its progress bar up through the call: the same state.
+  for (let i = 0; i < 9; i += 1) {
+    await sleep(5_000);
+    feed("long", "\x1b]9;4;1;10\x07");
+  }
+  const longNotes = (T.turnNotes ?? []).filter((note) => note.workspaceId === "ws-long" && note.at > longStart);
+  check(
+    "idle clock: a long quiet turn is stamped about every 10 s",
+    longNotes.length >= 4 && Math.max(...longNotes.map((note) => note.at)) >= Date.now() - 11_000,
+  );
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-long", panes: [] });
+
+  // Each folder keeps its own time.
+  T.cwds.set("mover", "/work/a");
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-mover", panes: [
+    { paneId: "mover", tabId: "tm", tabTitle: "claude", excluded: false, runtimeHint: "claude" },
+  ] });
+  const shortTurn = async (line, during = () => undefined) => {
+    mod.noteTerminalUserInput("mover", `${line}\r`);
+    feed("mover", "\x1b]9;4;1;10\x07");
+    await sleep(1500);
+    during();
+    await sleep(15_000);
+    feed("mover", "\x1b]9;4;0\x07");
+    await sleep(1500);
+  };
+  const folder = (dir) => mod.terminalAgentLastTurnAt((_workspaceId, cwd) => cwd === dir);
+  await shortTurn("first");
+  const firstEnd = folder("/work/a");
+  check("idle clock: a turn is credited to its folder", typeof firstEnd === "number" && firstEnd < Date.now());
+  await sleep(60_000);
+  T.cwds.set("mover", "/work/b");
+  await shortTurn("second");
+  check("idle clock: a turn in another folder leaves the first folder's time", folder("/work/a") === firstEnd && folder("/work/b") > firstEnd);
+  // The agent moved mid-turn (its Bash tool cd'ed): the folder its hooks
+  // report gets the turn's end, and so does the one it started in.
+  await sleep(60_000);
+  let movedEnd = 0;
+  await shortTurn("third", () => mod.noteTerminalHookEvent("mover", "PreToolUse", { tool_name: "Bash", cwd: "/work/moved" }));
+  movedEnd = folder("/work/b");
+  check("idle clock: a folder the agent moved to mid-turn is credited with the turn's end", folder("/work/moved") === movedEnd && movedEnd > firstEnd);
+  // Through two folders within seconds: the one it passed through counts too.
+  await sleep(60_000);
+  await shortTurn("hop", () => {
+    mod.noteTerminalHookEvent("mover", "PreToolUse", { tool_name: "Bash", cwd: "/work/hop-1" });
+    mod.noteTerminalHookEvent("mover", "PreToolUse", { tool_name: "Bash", cwd: "/work/hop-2" });
+    mod.noteTerminalHookEvent("mover", "PreToolUse", { tool_name: "Bash", cwd: "/work/hop-3" });
+  });
+  check("idle clock: a folder passed through between two stamps is credited", folder("/work/hop-2") === folder("/work/b") && folder("/work/hop-2") > movedEnd);
+  movedEnd = folder("/work/b");
+  // An old session's record names another folder: not this session's.
+  T.sessions = new Map([["mover", { paneId: "mover", runtime: "claude", sessionId: "old-session", cwd: "/work/old" }]]);
+  await sleep(60_000);
+  await shortTurn("fourth");
+  check("idle clock: an old session's folder is not credited", folder("/work/old") === null);
+  T.sessions = new Map([["mover", { paneId: "mover", runtime: "claude", sessionId: "22222222-mover", cwd: "/work/c" }]]);
+  mod.noteTerminalHookEvent("mover", "SessionStart", { session_id: "22222222-mover", source: "startup" });
+  await sleep(60_000);
+  await shortTurn("fifth");
+  check("idle clock: the folder the live session started in is credited", folder("/work/c") > movedEnd);
+  T.sessions = new Map();
+  // A pane started under a symlinked folder: the clean-up asks by the
+  // resolved path, so that one is credited too.
+  const linkRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codara-tan-link-"));
+  const realTree = path.join(linkRoot, "real-tree");
+  const linkedTree = path.join(linkRoot, "linked-tree");
+  fs.mkdirSync(realTree);
+  fs.symlinkSync(realTree, linkedTree);
+  T.cwds.set("mover", linkedTree);
+  await sleep(60_000);
+  await shortTurn("linked");
+  check(
+    "idle clock: a folder reached through a link is credited by its resolved path",
+    folder(fs.realpathSync(realTree)) === folder(linkedTree) && folder(linkedTree) > movedEnd,
+  );
+  fs.rmSync(linkRoot, { recursive: true, force: true });
+  // A prompt at startup, before any turn, is no work yet.
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-prompt", panes: [
+    { paneId: "prompt", tabId: "tq", tabTitle: "claude", excluded: false, runtimeHint: "claude" },
+  ] });
+  feed("prompt", "Do you trust the files in this folder?\r\n❯ 1. Yes, proceed\r\n  2. No, exit\r\n\r\nEnter to confirm · Esc to exit");
+  await sleep(500);
+  const promptChip = [...T.chips].reverse().find((chip) => chip.paneId === "prompt");
+  check("idle clock: the startup prompt shows as blocked", promptChip?.state === "blocked");
+  check("idle clock: a startup prompt is not a turn", mod.terminalAgentLastTurnAt((id) => id === "ws-prompt") === null);
 
   mod.disposeAllTerminalAgentWatchers();
   check("explicit watcher disposal detaches every tap", T.taps.size === 0);
