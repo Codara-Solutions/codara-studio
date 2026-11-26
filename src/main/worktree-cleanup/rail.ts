@@ -627,7 +627,9 @@ async function cleanUpRegistered(
   // A click takes only merged, committed work (railRefusal), so the maker's
   // tab in another folder (a coordinator open for days) does not hold it.
   // A worktree just made, with nothing committed yet, is where that agent
-  // is about to start; the rail offers it only once it is stale.
+  // is about to start. The rail can offer a row as stale by the work clock
+  // while this cautious clock (git's own files too) still holds the click:
+  // the click is then refused, the safe way round.
   const makerElsewhereOk = request.mode === "manual" && !(await freshlyMade(deps, repo, workspace, path));
   // Processes left running inside are judged apart (leftovers.ts) when they
   // can be stopped; the removal itself never accepts one.

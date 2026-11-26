@@ -116,6 +116,7 @@ export interface WorktreeCleanupDeps {
   paneIdleMs?(paneId: string): number | null;
   // When an agent in one of these workspaces, or working in one of these
   // folders, last had a turn (now while one runs); null when none did.
+  // Not connected in the app yet: absent, an agent's turn does not count.
   lastAgentTurnAt?(workspaceIds: readonly string[], dirs: readonly string[]): number | null;
   // Where the ignored files of a removed worktree are kept. Absent: they are
   // not kept, so a removal that would delete them is asked about.
@@ -878,8 +879,15 @@ export async function lastWorkAt(
     times.push(seconds * 1000);
   }
   // Made today on an old commit, or checked out or reset since: the time of
-  // HEAD's newest reflog entry, which a status or a fetch never adds.
-  const moved = /@\{(\d+)\}$/.exec(await readGitText(path, ["log", "-g", "-1", "--format=%gd", "--date=unix", "HEAD"]));
+  // HEAD's newest reflog entry, which a status or a fetch never adds. A read
+  // that failed is unknown; an empty one (no reflog kept) is no move.
+  let reflog: string;
+  try {
+    reflog = (await runGit(path, ["log", "-g", "-1", "--format=%gd", "--date=unix", "HEAD"])).stdout.trim();
+  } catch {
+    return null;
+  }
+  const moved = /@\{(\d+)\}$/.exec(reflog);
   if (moved) times.push(Number(moved[1]) * 1000);
   // git names changed paths from the top of the worktree.
   const top = paths.length ? await readGitText(path, ["rev-parse", "--show-toplevel"]) : path;

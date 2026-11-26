@@ -186,6 +186,24 @@ async function main() {
       assert.equal(await inspect.lastWorkAt(tree, head, repo, null), null, "201 new files in a new folder");
       fs.rmSync(path.join(tree, "many"), { recursive: true });
       assert.equal(days(await inspect.lastWorkAt(tree, head, repo, null)), 20);
+      // HEAD's history read fails (a timeout under load): a move today could
+      // hide behind it, so the clock does not fall back to the old commit.
+      const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+      const shimDir = path.join(scratch, "bin");
+      fs.mkdirSync(shimDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(shimDir, "git"),
+        `#!/bin/sh\nfor a in "$@"; do [ "$a" = "-g" ] && { echo "fatal: timed out" >&2; exit 128; }; done\nexec "${realGit}" "$@"\n`,
+        { mode: 0o755 },
+      );
+      const savedPath = process.env.PATH;
+      process.env.PATH = `${shimDir}${path.delimiter}${savedPath}`;
+      try {
+        assert.equal(await inspect.lastWorkAt(tree, head, repo, null), null, "HEAD's history could not be read");
+      } finally {
+        process.env.PATH = savedPath;
+      }
+      assert.equal(days(await inspect.lastWorkAt(tree, head, repo, null)), 20);
     });
 
     // ── The cleanup screen and the advice ──────────────────────────────────
