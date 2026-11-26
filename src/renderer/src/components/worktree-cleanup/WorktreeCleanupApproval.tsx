@@ -258,7 +258,7 @@ export default function WorktreeCleanupApproval({
         aria-labelledby="wtc-approval-title"
         aria-describedby="wtc-approval-asker"
         tabIndex={-1}
-        className="spark-glass--strong spark-overlay-surface wtc-dialog wtc-dialog--approval"
+        className="fb-solid wtc-dialog wtc-dialog--approval"
         data-testid="worktree-cleanup-approval"
         onKeyDown={trapTab}
       >

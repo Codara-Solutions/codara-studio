@@ -1,18 +1,5 @@
-/* Send feedback. Tokens only (DESIGN.md, "Feedback"). */
-
-/* A solid reading surface in both glass modes, as the pairing QR card
-   (.st-pair-modal): the dialog and the agent cards hold text to read and
-   type over live content, so nothing behind them ever shows through, with
-   or without a blur. */
-.fb-solid {
-  border: 1px solid var(--rule);
-  background: var(--panel);
-  box-shadow: 0 24px 64px oklch(0 0 0 / 0.35), 0 2px 8px oklch(0 0 0 / 0.18);
-}
-:root[data-theme-mode="light"] .fb-solid {
-  border-color: color-mix(in oklab, var(--ink) 12%, transparent);
-  box-shadow: 0 24px 64px oklch(0 0 0 / 0.16), 0 2px 8px oklch(0 0 0 / 0.08);
-}
+/* Send feedback. Tokens only (DESIGN.md, "Feedback"). The dialog and the
+   agent cards sit on the shared solid surface (.fb-solid, styles.css). */
 
 .fb-layer {
   position: fixed;

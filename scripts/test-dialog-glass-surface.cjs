@@ -2,16 +2,17 @@
 // test-runner: heavy (launches Chromium through Playwright)
 "use strict";
 
-// Modal dialogs read over a busy terminal. Their surface is the shared read
-// tier of glass (.spark-glass--strong.spark-overlay-surface): a deep tint and
-// a strong frost, so the words behind turn into color. The agent's "Remove
-// worktrees?" dialog wore those classes and still showed the terminal through
-// sharp, because its surface sat inside the scrim: the scrim's fade-in makes
-// it a backdrop root, so the frost blurred only the empty scrim. This holds:
+// Modal dialogs read over a busy terminal. Glass dialogs take the shared read
+// tier (.spark-glass--strong.spark-overlay-surface); their scrim must be a
+// sibling, since a scrim wrapper's fade-in makes it a backdrop root and the
+// frost then blurs only the empty scrim. The worktree clean-up dialogs (the
+// agent's "Remove worktrees?", Clean up worktrees, and the rail's Clean up
+// confirm) ask what to delete, and even the read tier let the terminal show
+// through, so they sit on the solid reading surface (.fb-solid). This holds:
 //   - every .spark-scrim is a sibling under its dialog, never a wrapper
-//   - the approval dialog's fill is at least as opaque as the shared dialog
-//     surface, with the same frost, and no ancestor cuts the frost off
-//   - over a terminal full of text, what leaks through the dialog is blurred
+//   - the three clean-up dialogs wear .fb-solid and no glass class
+//   - over a terminal full of text, each has an opaque fill, nothing above it
+//     fades it, and nothing of the terminal shows through it
 //   - nothing starts ticked, a row that cannot go has no checkbox and folds
 //     into one line at the bottom, the Remove button names the count, and a
 //     blocked row says why once
@@ -205,11 +206,121 @@ const BUSY_TEXT = Array.from({ length: 140 }, (_, line) =>
   `${String(line).padStart(4, "0")} build: compiled src/module-${line}.ts -> out/module-${line}.js  OK  ${"#".repeat(line % 37)} ${"lorem ipsum dolor sit amet ".repeat(3)}`,
 ).join("\n");
 
+const SOLID_DIALOGS = [
+  path.join(RENDERER, "components", "worktree-cleanup", "WorktreeCleanupApproval.tsx"),
+  path.join(RENDERER, "components", "worktree-cleanup", "WorktreeCleanupDialog.tsx"),
+  path.join(RENDERER, "components", "rail", "RailCleanUp.tsx"),
+];
+
+/**
+ * The surface's own fill, opacity and the ancestors that would fade it, then
+ * how much of the busy terminal shows through it: the dialog over the text
+ * against the dialog over the same blank terminal, as the sharp edges in the
+ * difference, inside the dialog and outside it under the scrim alone.
+ */
+async function measureSurface(page, dialog, selector) {
+  const look = await page.evaluate((selector) => {
+    const surface = document.querySelector(selector);
+    const own = getComputedStyle(surface);
+    const reference = document.createElement("div");
+    reference.className = "fb-solid";
+    reference.style.cssText = "position: fixed; left: 0; top: 0; width: 10px; height: 10px; pointer-events: none;";
+    document.body.appendChild(reference);
+    const result = {
+      background: own.backgroundColor,
+      opacity: own.opacity,
+      shadow: own.boxShadow,
+      solidShadow: getComputedStyle(reference).boxShadow,
+      focused: document.activeElement === surface,
+      roots: [],
+    };
+    reference.remove();
+    for (let element = surface.parentElement; element; element = element.parentElement) {
+      const style = getComputedStyle(element);
+      const why = [];
+      if (Number(style.opacity) < 1) why.push(`opacity ${style.opacity}`);
+      if (style.filter !== "none") why.push(`filter ${style.filter}`);
+      if (style.backdropFilter !== "none") why.push(`backdrop-filter ${style.backdropFilter}`);
+      if (style.mixBlendMode !== "normal") why.push(`mix-blend-mode ${style.mixBlendMode}`);
+      if ((style.maskImage || style.webkitMaskImage || "none") !== "none") why.push("mask");
+      if (style.clipPath !== "none") why.push(`clip-path ${style.clipPath}`);
+      if (/opacity|filter/.test(style.willChange)) why.push(`will-change ${style.willChange}`);
+      const animations = element.getAnimations ? element.getAnimations() : [];
+      if (animations.length) why.push(`${animations.length} animation(s) still in effect`);
+      if (why.length) result.roots.push(`${element.tagName.toLowerCase()}.${[...element.classList].join(".")}: ${why.join(", ")}`);
+    }
+    return result;
+  }, selector);
+
+  const box = await dialog.boundingBox();
+  const shoot = async () => (await page.screenshot({ type: "png" })).toString("base64");
+  const busy = await shoot();
+  await page.evaluate(() => document.getElementById("terminal").classList.add("is-blank"));
+  await page.waitForTimeout(100);
+  const blank = await shoot();
+  await page.evaluate(() => document.getElementById("terminal").classList.remove("is-blank"));
+  const leak = await page.evaluate(
+    async ({ busy, blank, box }) => {
+      const decode = async (data) => {
+        const image = new Image();
+        image.src = `data:image/png;base64,${data}`;
+        await image.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = image.width;
+        canvas.height = image.height;
+        const context = canvas.getContext("2d");
+        context.drawImage(image, 0, 0);
+        return context.getImageData(0, 0, image.width, image.height);
+      };
+      const a = await decode(busy);
+      const b = await decode(blank);
+      const luma = (data, x, y) => {
+        const i = (y * data.width + x) * 4;
+        return 0.2126 * data.data[i] + 0.7152 * data.data[i + 1] + 0.0722 * data.data[i + 2];
+      };
+      const diff = (x, y) => luma(a, x, y) - luma(b, x, y);
+      const edges = (x0, y0, x1, y1) => {
+        let total = 0;
+        let count = 0;
+        for (let y = Math.max(0, Math.floor(y0)); y < Math.min(a.height, Math.floor(y1)); y += 1) {
+          for (let x = Math.max(0, Math.floor(x0)); x < Math.min(a.width - 1, Math.floor(x1)); x += 1) {
+            total += Math.abs(diff(x + 1, y) - diff(x, y));
+            count += 1;
+          }
+        }
+        return count ? total / count : 0;
+      };
+      const inset = 6;
+      return {
+        inside: edges(box.x + inset, box.y + inset, box.x + box.width - inset, box.y + box.height - inset),
+        outside: Math.max(edges(0, 0, box.x - 2, a.height), edges(box.x + box.width + 2, 0, a.width, a.height), edges(0, 0, a.width, box.y - 2)),
+      };
+    },
+    { busy, blank, box },
+  );
+  return { ...look, leak };
+}
+
+function assertSolid(label, look) {
+  assert.deepEqual(look.roots, [], `${label}: an ancestor of the dialog fades or filters it`);
+  assert.equal(alphaOf(look.background), 1, `${label}: the dialog fill ${look.background} is see-through`);
+  assert.equal(look.opacity, "1", `${label}: the dialog itself is faded`);
+  // A dialog focused by script keeps the surface's shadow, not the focus ring.
+  assert.equal(look.shadow, look.solidShadow, `${label}: the dialog shadow is ${look.shadow}${look.focused ? " while focused" : ""}`);
+  assert.ok(look.leak.outside > 1, `${label}: the busy terminal is not visible around the dialog (${JSON.stringify(look.leak)})`);
+  assert.ok(look.leak.inside < 0.01, `${label}: the terminal shows through the dialog (edges inside ${look.leak.inside.toFixed(2)}, outside ${look.leak.outside.toFixed(2)})`);
+}
+
 async function main() {
-  // Every scrim is a sibling under its dialog, so the dialog frosts the window
-  // itself rather than the scrim's empty layer.
+  // Every scrim is a sibling under its dialog, so a glass dialog frosts the
+  // window itself rather than the scrim's empty layer.
   const wrapping = walk(RENDERER).flatMap(wrappingScrims);
   assert.deepEqual(wrapping, [], "a .spark-scrim wraps a dialog; make it a self-closing sibling under the surface, as in SettingsDialog.tsx");
+  for (const file of SOLID_DIALOGS) {
+    const text = fs.readFileSync(file, "utf8");
+    assert.match(text, /className="[^"]*\bfb-solid\b/, `${path.relative(ROOT, file)} does not sit on the solid surface`);
+    assert.doesNotMatch(text, /className="[^"]*\b(?:spark-glass[\w-]*|spark-overlay-surface)\b/, `${path.relative(ROOT, file)} is glass again`);
+  }
 
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codara-dialog-glass-"));
   let browser;
@@ -219,16 +330,40 @@ async function main() {
         contents: `import React from "react";
           import { createRoot } from "react-dom/client";
           import "./src/renderer/src/styles.css";
+          import "./src/renderer/src/components/rail/workspace-children.css";
           import WorktreeCleanupApproval from "./src/renderer/src/components/worktree-cleanup/WorktreeCleanupApproval";
+          import WorktreeCleanupDialog from "./src/renderer/src/components/worktree-cleanup/WorktreeCleanupDialog";
+          import { RailConfirm } from "./src/renderer/src/components/rail/RailCleanUp";
           window.answers = [];
           window.spark = {
-            worktreeCleanup: { answerApproval: async (answer) => { window.answers.push(answer); return null; } },
+            worktreeCleanup: {
+              answerApproval: async (answer) => { window.answers.push(answer); return null; },
+              scan: async () => ({ scannedAt: Date.now(), repos: [], rows: [], processScan: true }),
+              measure: async () => ({ pending: 0 }),
+              onSize: () => () => undefined,
+              stopMeasuring: async () => undefined,
+            },
             clipboard: { writeText: async () => undefined },
           };
-          window.mountApproval = (request) => {
-            const host = document.getElementById("root");
-            createRoot(host).render(<WorktreeCleanupApproval request={request} onDone={() => { window.done = true; }} />);
-          };`,
+          let root = null;
+          const render = (element) => {
+            root?.unmount();
+            root = createRoot(document.getElementById("root"));
+            root.render(element);
+          };
+          window.mountApproval = (request) => render(<WorktreeCleanupApproval request={request} onDone={() => { window.done = true; }} />);
+          window.mountCleanup = () => render(<WorktreeCleanupDialog workspaceId={null} onClose={() => undefined} />);
+          window.mountRailConfirm = () => render(
+            <RailConfirm
+              title="Clean up 2 merged worktrees?"
+              text="Their folders, branches and rows are removed:"
+              items={["widgets · feat/old", "widgets · feat/older"]}
+              okLabel="Clean up"
+              testId="rail-confirm"
+              onCancel={() => undefined}
+              onConfirm={() => undefined}
+            />,
+          );`,
         resolveDir: ROOT,
         sourcefile: "dialog-glass-harness.tsx",
         loader: "tsx",
@@ -295,108 +430,9 @@ async function main() {
         // Let the scrim's fade-in finish: a filled animation must not hold on.
         await page.waitForTimeout(400);
 
-        // The fill is at least as opaque as the shared dialog surface, with
-        // the same frost, and nothing above it cuts that frost off.
-        const look = await page.evaluate(() => {
-          const surface = document.querySelector('[data-testid="worktree-cleanup-approval"]');
-          const reference = document.createElement("div");
-          reference.className = "spark-glass--strong spark-overlay-surface";
-          reference.style.cssText = "position: fixed; left: 0; top: 0; width: 10px; height: 10px; pointer-events: none;";
-          document.body.appendChild(reference);
-          const own = getComputedStyle(surface);
-          const shared = getComputedStyle(reference);
-          const result = {
-            background: own.backgroundColor,
-            sharedBackground: shared.backgroundColor,
-            backdrop: own.backdropFilter,
-            sharedBackdrop: shared.backdropFilter,
-            opacity: own.opacity,
-            roots: [],
-          };
-          reference.remove();
-          for (let element = surface.parentElement; element; element = element.parentElement) {
-            const style = getComputedStyle(element);
-            const why = [];
-            if (Number(style.opacity) < 1) why.push(`opacity ${style.opacity}`);
-            if (style.filter !== "none") why.push(`filter ${style.filter}`);
-            if (style.backdropFilter !== "none") why.push(`backdrop-filter ${style.backdropFilter}`);
-            if (style.mixBlendMode !== "normal") why.push(`mix-blend-mode ${style.mixBlendMode}`);
-            if ((style.maskImage || style.webkitMaskImage || "none") !== "none") why.push("mask");
-            if (style.clipPath !== "none") why.push(`clip-path ${style.clipPath}`);
-            if (/opacity|filter/.test(style.willChange)) why.push(`will-change ${style.willChange}`);
-            const animations = element.getAnimations ? element.getAnimations() : [];
-            if (animations.length) why.push(`${animations.length} animation(s) still in effect`);
-            if (why.length) result.roots.push(`${element.tagName.toLowerCase()}.${[...element.classList].join(".")}: ${why.join(", ")}`);
-          }
-          return result;
-        });
-        assert.deepEqual(look.roots, [], `${label}: an ancestor of the dialog is a backdrop root, so its frost sees nothing behind it`);
-        assert.ok(
-          alphaOf(look.background) >= alphaOf(look.sharedBackground) - 0.001,
-          `${label}: the dialog fill ${look.background} is thinner than the shared dialog surface ${look.sharedBackground}`,
-        );
-        assert.equal(look.backdrop, look.sharedBackdrop, `${label}: the dialog frost differs from the shared dialog surface`);
-        assert.match(look.backdrop, /blur\((?!0px)/, `${label}: the dialog does not frost`);
-        assert.equal(look.opacity, "1", `${label}: the dialog itself is faded`);
-
-        // What the busy terminal leaks through the dialog is blurred: compare
-        // the dialog over the text with the dialog over the same blank
-        // terminal, and measure the sharp edges in the difference, inside the
-        // dialog and outside it under the scrim alone.
-        const box = await dialog.boundingBox();
-        const shoot = async () => (await page.screenshot({ type: "png" })).toString("base64");
-        const busy = await shoot();
-        if (shots) {
-          await page.screenshot({ path: path.join(shots, `approval-${theme.mode}-${viewport.width}.png`) });
-        }
-        await page.evaluate(() => document.getElementById("terminal").classList.add("is-blank"));
-        await page.waitForTimeout(100);
-        const blank = await shoot();
-        await page.evaluate(() => document.getElementById("terminal").classList.remove("is-blank"));
-        const leak = await page.evaluate(
-          async ({ busy, blank, box }) => {
-            const decode = async (data) => {
-              const image = new Image();
-              image.src = `data:image/png;base64,${data}`;
-              await image.decode();
-              const canvas = document.createElement("canvas");
-              canvas.width = image.width;
-              canvas.height = image.height;
-              const context = canvas.getContext("2d");
-              context.drawImage(image, 0, 0);
-              return context.getImageData(0, 0, image.width, image.height);
-            };
-            const a = await decode(busy);
-            const b = await decode(blank);
-            const luma = (data, x, y) => {
-              const i = (y * data.width + x) * 4;
-              return 0.2126 * data.data[i] + 0.7152 * data.data[i + 1] + 0.0722 * data.data[i + 2];
-            };
-            const diff = (x, y) => luma(a, x, y) - luma(b, x, y);
-            const edges = (x0, y0, x1, y1) => {
-              let total = 0;
-              let count = 0;
-              for (let y = Math.max(0, Math.floor(y0)); y < Math.min(a.height, Math.floor(y1)); y += 1) {
-                for (let x = Math.max(0, Math.floor(x0)); x < Math.min(a.width - 1, Math.floor(x1)); x += 1) {
-                  total += Math.abs(diff(x + 1, y) - diff(x, y));
-                  count += 1;
-                }
-              }
-              return count ? total / count : 0;
-            };
-            const inset = 6;
-            return {
-              inside: edges(box.x + inset, box.y + inset, box.x + box.width - inset, box.y + box.height - inset),
-              outside: Math.max(edges(0, 0, box.x - 2, a.height), edges(box.x + box.width + 2, 0, a.width, a.height), edges(0, 0, a.width, box.y - 2)),
-            };
-          },
-          { busy, blank, box },
-        );
-        assert.ok(leak.outside > 1, `${label}: the busy terminal is not visible around the dialog (${JSON.stringify(leak)})`);
-        assert.ok(
-          leak.inside < leak.outside * 0.15,
-          `${label}: the terminal shows through the dialog sharp (edges inside ${leak.inside.toFixed(2)}, outside ${leak.outside.toFixed(2)})`,
-        );
+        if (shots) await page.screenshot({ path: path.join(shots, `approval-${theme.mode}-${viewport.width}.png`) });
+        const look = await measureSurface(page, dialog, '[data-testid="worktree-cleanup-approval"]');
+        assertSolid(label, look);
 
         // Nothing starts ticked; Remove is off until something is, then names the count.
         const boxes = dialog.locator("li[data-worktree-path] .wtc-review-head > input[type=checkbox]");
@@ -421,16 +457,11 @@ async function main() {
         await expect(dialog.getByRole("button", { name: "Remove 1 worktree" })).toBeEnabled();
         if (shots) await page.screenshot({ path: path.join(shots, `approval-${theme.mode}-${viewport.width}-ticked.png`) });
         assert.deepEqual(errors, [], `${label}: page errors`);
-        console.log(`  ok ${label}: fill ${look.background}, leak inside ${leak.inside.toFixed(2)} vs outside ${leak.outside.toFixed(2)}`);
+        console.log(`  ok ${label}: fill ${look.background}, leak inside ${look.leak.inside.toFixed(2)} vs outside ${look.leak.outside.toFixed(2)}`);
 
         // The crowded case: 17 that can go, 18 that cannot, and the agent's line.
         await page.evaluate(() => {
           window.answers = [];
-          document.getElementById("root").remove();
-          const host = document.createElement("div");
-          host.id = "root";
-          host.style.cssText = "position: fixed; inset: 0;";
-          document.body.appendChild(host);
         });
         const crowded = crowdedRequest();
         await page.evaluate((request) => window.mountApproval(request), crowded);
@@ -469,10 +500,25 @@ async function main() {
         for (const entry of crowded.items) assert.equal(sent.get(entry.path), entry.blocked === null, `${label}: ${entry.path} sent wrong`);
         assert.deepEqual(errors, [], `${label}: page errors`);
         console.log(`  ok ${label}: 17 ticked with Tick all, 18 folded and never sent`);
+
+        // The clean-up screen and the rail's confirm sit on the same solid surface.
+        for (const other of [
+          { name: "cleanup", mount: "mountCleanup", locator: page.getByRole("dialog", { name: "Clean up worktrees" }), selector: ".wtc-dialog" },
+          { name: "rail-confirm", mount: "mountRailConfirm", locator: page.getByTestId("rail-confirm"), selector: '[data-testid="rail-confirm"]' },
+        ]) {
+          await page.evaluate((mount) => window[mount](), other.mount);
+          await expect(other.locator).toBeVisible();
+          await page.waitForTimeout(400);
+          if (shots) await page.screenshot({ path: path.join(shots, `${other.name}-${theme.mode}-${viewport.width}.png`) });
+          const otherLook = await measureSurface(page, other.locator, other.selector);
+          assertSolid(`${label} ${other.name}`, otherLook);
+          console.log(`  ok ${label} ${other.name}: fill ${otherLook.background}, leak inside ${otherLook.leak.inside.toFixed(2)} vs outside ${otherLook.leak.outside.toFixed(2)}`);
+        }
+        assert.deepEqual(errors, [], `${label}: page errors`);
         await page.close();
       }
     }
-    console.log("PASS dialogs frost the window behind them, and the approval dialog removes nothing by accident");
+    console.log("PASS the clean-up dialogs are solid over a busy terminal, every scrim is a sibling, and the approval dialog removes nothing by accident");
   } finally {
     await browser?.close();
     fs.rmSync(directory, { recursive: true, force: true });

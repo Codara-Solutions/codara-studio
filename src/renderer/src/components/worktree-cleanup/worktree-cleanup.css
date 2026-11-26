@@ -1,12 +1,10 @@
 /* The worktree cleanup screen (WorktreeCleanupDialog.tsx) and an agent's
    removal request (WorktreeCleanupApproval.tsx). Modals over the window: the
-   dim is the shared .spark-scrim and the surface the shared floating glass
-   (.spark-glass--strong.spark-overlay-surface), so they follow the glass
-   setting and every theme through tokens only. The scrim is a sibling under
-   the surface, as in Settings, never its parent: the scrim's fade-in makes
-   it a backdrop root, and a surface inside it frosted only the empty scrim,
-   so the terminal behind showed through sharp
-   (test-dialog-glass-surface.cjs). */
+   dim is the shared .spark-scrim and the surface the shared solid reading
+   surface (.fb-solid, styles.css), never glass: they ask what to delete over
+   busy terminals, and even the read tier of glass let the text behind show
+   through. Tokens only, so every theme follows. The scrim is a sibling under
+   the surface, as in Settings, never its parent (test-dialog-glass-surface.cjs). */
 
 .wtc-layer {
   position: absolute;
