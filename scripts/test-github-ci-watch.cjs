@@ -1125,6 +1125,105 @@ test("a pull request whose only bad run was cancelled prompts no one", async ({ 
   assert.deepEqual(h.failing, []);
 });
 
+test("review 1: a lane never runs more than its size, whenever a newcomer arrives", async ({ mod }) => {
+  for (let offset = 0; offset < 8; offset += 1) {
+    const { checks } = mod.pullRequestReadLanes(1, 1);
+    let active = 0;
+    let most = 0;
+    const gate = () => {
+      let release;
+      const held = new Promise((resolve) => (release = resolve));
+      return { held, release };
+    };
+    const task = (g) => checks(async () => {
+      active += 1;
+      most = Math.max(most, active);
+      await g.held;
+      active -= 1;
+    });
+    const [a, b, c] = [gate(), gate(), gate()];
+    task(a);
+    const second = task(b);
+    for (let i = 0; i < 5; i += 1) await Promise.resolve();
+    a.release();
+    for (let i = 0; i < offset; i += 1) await Promise.resolve();
+    const third = task(c);
+    for (let i = 0; i < 20; i += 1) await Promise.resolve();
+    b.release();
+    c.release();
+    await Promise.all([second, third]);
+    assert.equal(most, 1, `a newcomer ${offset} ticks after a release`);
+  }
+});
+
+test("review 1: a row that fails to apply ends neither the pass nor the other rows", async ({ mod }) => {
+  const h = harness(mod, {
+    workspaces: [ws("ws-1", "/repo"), ws("ws-2", "/other")],
+    refs: { "/repo": "h1 u1", "/other": "h2 u2" },
+    prs: { "/repo": pr(HEAD_A, { number: 1 }), "/other": pr(HEAD_A, { number: 2 }) },
+  });
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  // The first row's entry throws; the second row's read is slow.
+  const watch = mod.createGitHubCiWatch({
+    loadState: async () => h.state,
+    enabled: () => true,
+    pathExists: async () => true,
+    localRefs: async (cwd) => refsOf(h.refs[cwd]),
+    readPullRequest: async (cwd) => {
+      if (cwd === "/other") await held;
+      return h.prs[cwd];
+    },
+    publish: () => undefined,
+    rearm: () => undefined,
+    onEntry: (workspaceId) => {
+      if (workspaceId === "ws-1") throw new Error("renderer gone");
+    },
+    now: () => h.now,
+    setTimeout: () => ({}),
+    clearTimeout: () => undefined,
+    log: (message) => h.logs.push(message),
+  });
+  let ended = false;
+  const passing = watch.runPass().then(() => (ended = true));
+  for (let i = 0; i < 20; i += 1) await Promise.resolve();
+  assert.equal(ended, false, "the pass waits for the slow row");
+  release();
+  await passing;
+  assert.equal(new Map(watch.entries().map((entry) => [entry.workspaceId, entry.pullRequest?.number])).get("ws-2"), 2);
+  assert.ok(h.logs.some((line) => line.includes("could not apply the pull request of ws-1")));
+});
+
+test("review 1: a read that comes back after the watcher was turned off changes nothing", async ({ mod }) => {
+  const h = harness(mod, { prs: { "/repo": pr(HEAD_A, { failed: ["build"], failedAt: Date.now() }) } });
+  let release;
+  h.gate = new Promise((resolve) => (release = resolve));
+  const passing = h.pass();
+  for (let i = 0; i < 20; i += 1) await Promise.resolve();
+  h.enabled = false;
+  release();
+  await passing;
+  assert.deepEqual(h.watch.entries(), []);
+  assert.deepEqual(h.published, []);
+  assert.deepEqual(h.failing, []);
+});
+
+test("review 1: a check whose newest run was cancelled is never passing", async ({ mod }) => {
+  const at = (minute) => `2026-10-01T10:${String(minute).padStart(2, "0")}:00Z`;
+  const summary = mod.summarizeRestChecks(
+    {
+      check_runs: [
+        run("build", "completed", "failure", { started: at(0), completed: at(2) }),
+        run("build", "completed", "cancelled", { started: at(5), completed: at(6) }),
+        run("lint", "completed", "success", { started: at(0), completed: at(1) }),
+      ],
+    },
+    null,
+  );
+  assert.deepEqual(summary, { failed: [], failedAt: 0, pending: 0, passed: 0 });
+  assert.equal(mod.checksOf(summary), "none", "no green note for a build that never passed");
+});
+
 // ── Runner ──────────────────────────────────────────────────────────────────
 
 (async () => {

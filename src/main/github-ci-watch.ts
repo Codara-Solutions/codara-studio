@@ -440,7 +440,13 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
     await Promise.all(
       due.map(async (row) => {
         const pr = await deps.readPullRequest(row.cwd, row.refs).catch((cause: unknown) => (cause instanceof Error ? cause : new Error(String(cause))));
-        apply(row, pr);
+        // One row's failure ends neither the pass nor the other rows: the
+        // pass is over only once every row is.
+        try {
+          apply(row, pr);
+        } catch (cause) {
+          deps.log(`could not apply the pull request of ${row.group[0].name}: ${cause instanceof Error ? cause.message : String(cause)}`);
+        }
       }),
     );
     for (const cwd of [...workspaces.keys()]) if (!byCwd.has(cwd)) workspaces.delete(cwd);
@@ -450,6 +456,8 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
   }
 
   function apply({ cwd, group, ids, refs, repositoryOn, now, track, moved }: DueRead, pr: CiPullRequestSnapshot | null | Error): void {
+    // Turned off while the read was out.
+    if (!deps.enabled()) return;
     const switchedOff = (workspaceId: string): PullRequestWatchEntry => ({ workspaceId, repository: refs.repository, watching: false });
     if (pr instanceof Error) {
       // Once per streak of errors, not every retry.
@@ -657,6 +665,7 @@ export function summarizeRestChecks(
   let failedAt = 0;
   let pending = 0;
   let passed = 0;
+  const cancelled: Record<string, unknown>[] = [];
   for (const check of latestCheckContexts(contexts)) {
     const signal = [check.conclusion, check.state, check.status].find((part) => typeof part === "string" && part) as string | undefined;
     const name = String(check.name || check.context || "check").replace(/\s+/g, " ").slice(0, 80);
@@ -665,8 +674,15 @@ export function summarizeRestChecks(
       failed.push(name);
       failedAt = Math.max(failedAt, githubTime(check.completedAt) || githubTime(check.startedAt));
     } else if (upper && SUCCESS_STATES.has(upper)) passed += 1;
-    else if (!upper || !SETTLED_STATES.has(upper)) pending += 1;
+    else if (upper && SETTLED_STATES.has(upper)) cancelled.push(check);
+    else pending += 1;
   }
+  // A cancelled run no newer run of the same name replaced (in this suite or
+  // another) leaves that check unproven: never "passing", so no green note.
+  const timeOf = (check: Record<string, unknown>) => githubTime(check.startedAt) || githubTime(check.completedAt);
+  const replaced = (check: Record<string, unknown>) =>
+    contexts.some((other) => other.name === check.name && other.conclusion !== "CANCELLED" && timeOf(other) > timeOf(check));
+  if (cancelled.some((check) => !replaced(check))) passed = 0;
   return { failed, failedAt, pending, passed };
 }
 
@@ -839,6 +855,7 @@ export function ghConfigDir(home: string): string {
 // checks are read at once. Apart, so a row whose pull request is merged or
 // closed (no checks to read) never waits behind slow check reads.
 export const CI_WATCH_LOOKUPS_AT_ONCE = 3;
+export const CI_WATCH_CACHED_PATHS = 1200;
 export const CI_WATCH_CHECK_READS_AT_ONCE = 3;
 
 type Lane = <T>(task: () => Promise<T>) => Promise<T>;
@@ -847,13 +864,16 @@ function lane(size: number): Lane {
   let active = 0;
   const waiting: Array<() => void> = [];
   return async (task) => {
+    // A freed place goes straight to the next in line, so a newcomer
+    // arriving in between cannot take it too.
     if (active >= size) await new Promise<void>((resolve) => waiting.push(resolve));
-    active += 1;
+    else active += 1;
     try {
       return await task();
     } finally {
-      active -= 1;
-      waiting.shift()?.();
+      const next = waiting.shift();
+      if (next) next();
+      else active -= 1;
     }
   };
 }
@@ -962,13 +982,17 @@ async function productionDeps(): Promise<{ deps: GitHubCiWatchDeps; stop: () => 
   const readerFor = (executablePath: string, host: string) => {
     let reader = readers.get(host);
     if (!reader) {
-      reader = conditional.createConditionalGitHubReader((args) =>
-        github.runGitHubCliCommand({
-          executablePath,
-          args: host === "github.com" ? args : [...args.slice(0, 1), "--hostname", host, ...args.slice(1)],
-          timeoutMs: github.GITHUB_CLI_READ_TIMEOUT_MS,
-          maxOutputBytes: github.GITHUB_CLI_MAX_OUTPUT_BYTES,
-        }),
+      reader = conditional.createConditionalGitHubReader(
+        (args) =>
+          github.runGitHubCliCommand({
+            executablePath,
+            args: host === "github.com" ? args : [...args.slice(0, 1), "--hostname", host, ...args.slice(1)],
+            timeoutMs: github.GITHUB_CLI_READ_TIMEOUT_MS,
+            maxOutputBytes: github.GITHUB_CLI_MAX_OUTPUT_BYTES,
+          }),
+        // Every row is watched: about three paths per open pull request, and
+        // a path pushed out costs a full read instead of a free 304.
+        CI_WATCH_CACHED_PATHS,
       );
       readers.set(host, reader);
     }
