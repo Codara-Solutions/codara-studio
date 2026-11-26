@@ -474,6 +474,54 @@ async function main() {
       git(repo, ["worktree", "prune"]);
     });
 
+    // Once it is aside, the archive's disk cannot be read and a file takes
+    // the link's place, so the folder goes back without its link.
+    const failArchiveAside = (where, fn) =>
+      patched(
+        "statfs",
+        async () => {
+          const parent = path.dirname(where);
+          const aside = fs.readdirSync(parent).find((name) => name.endsWith(".codara-removing") && name.includes(path.basename(where)));
+          if (aside) fs.writeFileSync(path.join(parent, aside, "node_modules"), "made since\n");
+          throw Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
+        },
+        fn,
+      );
+
+    await check("round 3: a failed archive names the links it left held, on the screen and in the audit", async () => {
+      const dir = add("archive-held", "feat/archive-held");
+      fs.symlinkSync(packages, path.join(dir, "node_modules"), "dir");
+      fs.mkdirSync(path.join(dir, "pkg", "node_modules"), { recursive: true });
+      fs.writeFileSync(path.join(dir, "pkg", "node_modules", "mine.js"), "1\n");
+      const entry = await checkOf(dir);
+      assert.ok(entry.localWork?.ignored?.includes("pkg/node_modules/"), JSON.stringify(entry.localWork));
+      deps.archiveRoot = () => path.join(scratch, "archive");
+      let result;
+      try {
+        result = await failArchiveAside(dir, async () =>
+          (
+            await removeMod.removeCleanupWorktrees(
+              deps,
+              {
+                items: [{ repoRoot: repo, path: dir, fingerprint: entry.fingerprint, confirmDirty: true, confirmUnmerged: false }],
+                deleteMergedBranches: false,
+              },
+              { archiveIgnored: true },
+            )
+          ).outcomes[0],
+        );
+      } finally {
+        delete deps.archiveRoot;
+      }
+      assert.equal(result.code, "ARCHIVE_FAILED", JSON.stringify(result));
+      assert.equal(fs.readFileSync(path.join(dir, "pkg", "node_modules", "mine.js"), "utf8"), "1\n", "the folder is back");
+      const held = readAudit(auditFile).filter((line) => line.path === dir && line.outcome === "refused").pop()?.heldLinks ?? [];
+      assert.deepEqual(held.map((link) => link.path), ["node_modules"], JSON.stringify(result));
+      assert.deepEqual(heldIn(result.message), held.map((link) => link.held), result.message);
+      assert.equal(fs.readlinkSync(held[0].held), packages, "held where it is named");
+      packagesIntact();
+    });
+
     await check("round 2: a removal without its move aside leaves a node_modules link to git, as before", async () => {
       const dir = add("no-aside", "feat/no-aside");
       fs.symlinkSync(packages, path.join(dir, "node_modules"), "dir");
@@ -626,6 +674,31 @@ async function main() {
       const line = readAudit(auditFile).filter((entry) => entry.workspaceId === failing.workspaceId && entry.outcome === "refused").pop();
       assert.deepEqual(line?.heldLinks, refused.heldLinks, JSON.stringify(line));
       assert.equal(fs.readlinkSync(line.heldLinks[0].held), packages, "held where the audit says");
+      packagesIntact();
+
+      // round 3: an archive that failed names the links it left held too.
+      made = null;
+      const archiving = await agent.createAgentWorktree(maker, { branch: "agent/archive-held" }, agentDeps);
+      assert.equal(archiving.ok, true, JSON.stringify(archiving));
+      scans = 0;
+      made = archiving;
+      fs.mkdirSync(path.join(archiving.path, "pkg", "node_modules"), { recursive: true });
+      fs.writeFileSync(path.join(archiving.path, "pkg", "node_modules", "mine.js"), "1\n");
+      agentDeps.archiveRoot = () => path.join(scratch, "agent-archive");
+      let unarchived;
+      try {
+        unarchived = await failArchiveAside(archiving.path, () =>
+          agent.removeAgentWorktree(maker, { workspaceId: archiving.workspaceId }, agentDeps),
+        );
+      } finally {
+        delete agentDeps.archiveRoot;
+      }
+      assert.equal(unarchived.code, "WORKTREE_ARCHIVE_FAILED", JSON.stringify(unarchived));
+      assert.equal(fs.readFileSync(path.join(archiving.path, "pkg", "node_modules", "mine.js"), "utf8"), "1\n", "the folder is back");
+      assert.equal(unarchived.heldLinks?.length, 1, JSON.stringify(unarchived));
+      const archiveLine = readAudit(auditFile).filter((entry) => entry.workspaceId === archiving.workspaceId && entry.outcome === "refused").pop();
+      assert.deepEqual(archiveLine?.heldLinks, unarchived.heldLinks, JSON.stringify(archiveLine));
+      assert.equal(fs.readlinkSync(archiveLine.heldLinks[0].held), packages, "held where the audit says");
       packagesIntact();
     });
   } finally {

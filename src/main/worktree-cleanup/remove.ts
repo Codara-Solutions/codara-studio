@@ -496,15 +496,16 @@ async function removeOne(
         recheck: async (aside) => (await changedWhileAside(ctx, check, real, aside, before!, options)) ?? archiveFrom(aside),
       },
     });
-    if (!removed.ok && archiveError) {
-      await audit("refused", { code: "ARCHIVE_FAILED", recoveryRef });
-      return { outcome: { ...outcome, status: "refused", code: "ARCHIVE_FAILED", message: archiveError }, dropWorkspaces: [] };
-    }
     // Every held link stays named: the message before them is cut, never
     // they, however long the part before is.
+    const named = removed.ok ? "" : cleanText(heldText(removed.held ?? []), Infinity);
+    if (!removed.ok && archiveError) {
+      await audit("refused", { code: "ARCHIVE_FAILED", recoveryRef, held: removed.held });
+      const message = [archiveError, named].filter(Boolean).join(" ");
+      return { outcome: { ...outcome, status: "refused", code: "ARCHIVE_FAILED", message }, dropWorkspaces: [] };
+    }
     let failure = "";
     if (!removed.ok) {
-      const named = cleanText(heldText(removed.held ?? []), Infinity);
       const error = cleanText(removed.error, Infinity);
       const before = named && error.endsWith(named) ? error.slice(0, -named.length) : error;
       failure = [cleanText(before, 400), named].filter(Boolean).join(" ");

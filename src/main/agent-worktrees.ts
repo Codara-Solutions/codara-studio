@@ -3768,11 +3768,11 @@ async function removeLocked(
           (await changedWhileAside(recheckCtx, stillListed, realBefore, aside, before)) ?? archiveFrom(aside),
       },
     });
-    if (!removed.ok && archiveError) {
-      return refusal("WORKTREE_ARCHIVE_FAILED", archiveError, { workspaceId: workspace.id, recoveryRef });
-    }
     // Held links are listed apart from the message, which may be cut.
     const heldLinks = !removed.ok && removed.held?.length ? { heldLinks: removed.held } : {};
+    if (!removed.ok && archiveError) {
+      return refusal("WORKTREE_ARCHIVE_FAILED", archiveError, { workspaceId: workspace.id, recoveryRef, ...heldLinks });
+    }
     if (!removed.ok && removed.changed) {
       return refusal("WORKTREE_CHANGED", removed.error, { workspaceId: workspace.id, recoveryRef, ...heldLinks });
     }
