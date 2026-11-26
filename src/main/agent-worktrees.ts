@@ -1066,8 +1066,6 @@ const NESTED_SCAN_CONCURRENCY = 16;
 
 interface NestedScan {
   found: string[];
-  /** Module clones taken as tool output (isPristineModuleDownload), relative to the root: checked again before deletion. */
-  pristine: string[];
   /** Secret files inside ignored directories, relative to the root: a regenerable folder must not hide one. */
   secrets: string[];
   // The ignored folder the walk could not finish, or null when it saw every
@@ -1140,9 +1138,9 @@ async function isPristineModuleDownload(
   if (!(await fsp.lstat(dotGit).catch(() => null))?.isDirectory()) return false;
   if (!(await plainCloneConfig(dotGit))) return false;
   // Git metadata of its own and no one else's: none taken from another
-  // folder (commondir), and no worktree of its own registered elsewhere,
-  // whose .git would point into this one.
-  for (const name of ["commondir", "worktrees"]) {
+  // folder (commondir), no worktree of its own registered elsewhere, whose
+  // .git would point into this one, and no submodule's (modules).
+  for (const name of ["commondir", "worktrees", "modules"]) {
     if ((await fsp.lstat(join(dotGit, name)).catch(() => null)) !== null) return false;
   }
   // Its own config only, and only what git needs to run: no global, system
@@ -1165,7 +1163,11 @@ async function isPristineModuleDownload(
     // status must never answer for the clone.
     const gitDir = await fsp.realpath((await git(["rev-parse", "--absolute-git-dir"])).stdout.trim());
     if (gitDir !== (await fsp.realpath(dotGit))) return false;
-    const status = await git(["status", "--porcelain", "--ignored", "--untracked-files=all"]);
+    // A submodule is a repository of its own, with a config nothing here
+    // read: git must never run in it, and its commits are no clone's.
+    const staged = await git(["ls-files", "-s", "-z"]);
+    if (staged.stdout.split("\0").some((record) => record.startsWith("160000 "))) return false;
+    const status = await git(["status", "--porcelain", "--ignored", "--untracked-files=all", "--ignore-submodules=all"]);
     if (status.stdout.trim()) return false;
     const hidden = await git(["ls-files", "-v", "-z"]);
     for (const record of hidden.stdout.split("\0")) {
@@ -1189,7 +1191,6 @@ export async function checkoutsInIgnored(
 ): Promise<NestedScan> {
   const isPackageRoot = options.isPackageRoot ?? packageRootTester(root);
   const found: string[] = [];
-  const pristine: string[] = [];
   const secrets: string[] = [];
   let incomplete: string | null = null;
   let budget = maxDirs;
@@ -1199,8 +1200,8 @@ export async function checkoutsInIgnored(
     if (existsSync(join(absolute, ".git"))) {
       // A module terraform init cloned, untouched since, comes back with
       // the next init: it is that tool's output, not a checkout of anyone's.
-      if (await isPristineModuleDownload(root, relative, extra, isPackageRoot)) pristine.push(relative);
-      else found.push(resolve(absolute));
+      // The removal's last fingerprint covers its files and git state.
+      if (!(await isPristineModuleDownload(root, relative, extra, isPackageRoot))) found.push(resolve(absolute));
       return { dirs: [], lines: [] };
     }
     const children = await fsp
@@ -1257,7 +1258,7 @@ export async function checkoutsInIgnored(
     }
     if (incomplete || found.length >= MAX_LISTED_PATHS) break;
   }
-  return { found, pristine, secrets, incomplete };
+  return { found, secrets, incomplete };
 }
 
 function dateStamp(date: Date): string {

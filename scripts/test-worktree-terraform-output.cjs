@@ -259,6 +259,53 @@ async function main() {
       }
     });
 
+    await check("review 1: a module holding a submodule is a checkout, and git never runs in the submodule", async () => {
+      // The submodule: commits only on this disk, and a filter in its own config.
+      const subWork = path.join(scratch, "sub-work");
+      execFileSync("git", ["init", "-q", "-b", "main", subWork]);
+      commitFile(subWork, ".gitattributes", "* filter=x\n", "attributes");
+      const subTip = commitFile(subWork, "a.txt", "only here\n", "only on this disk");
+      const marker = path.join(scratch, "submodule-filter-ran");
+      fs.appendFileSync(path.join(subWork, ".git", "config"), `[filter "x"]\n\tclean = "sh -c 'touch ${marker}; cat'"\n`);
+      // The module records it as a gitlink, pushed to its origin.
+      const netSource = path.join(scratch, "net.git");
+      const netWork = path.join(scratch, "net-work");
+      execFileSync("git", ["init", "-q", "--bare", "-b", "main", netSource]);
+      execFileSync("git", ["clone", "-q", netSource, netWork]);
+      commitFile(netWork, "main.tf", "# net\n", "net");
+      git(netWork, ["update-index", "--add", "--cacheinfo", `160000,${subTip},sub`]);
+      git(netWork, ["commit", "-q", "-m", "sub"]);
+      git(netWork, ["push", "-q", "origin", "main"]);
+      const modules = path.join(infra, "infra", ".terraform", "modules");
+      const manifest = path.join(modules, "modules.json");
+      const written = fs.readFileSync(manifest, "utf8");
+      const net = path.join(modules, "net");
+      execFileSync("git", ["clone", "-q", netSource, net]);
+      fs.rmSync(path.join(net, "sub"), { recursive: true, force: true });
+      fs.cpSync(subWork, path.join(net, "sub"), { recursive: true });
+      const later = new Date(Date.now() + 5_000);
+      fs.utimesSync(path.join(net, "sub", "a.txt"), later, later);
+      const listed = JSON.parse(written);
+      listed.Modules.push({ Key: "net", Source: "git::https://example.invalid/net.git", Dir: ".terraform/modules/net" });
+      fs.writeFileSync(manifest, JSON.stringify(listed));
+      try {
+        assert.ok(codes(await checkOf(infra)).includes("NESTED_CHECKOUT"), "a submodule's commits are no clone's");
+        assert.equal(fs.existsSync(marker), false, "the submodule's filter ran");
+      } finally {
+        fs.rmSync(net, { recursive: true, force: true });
+        fs.writeFileSync(manifest, written);
+      }
+      assert.deepEqual(codes(await checkOf(infra)), []);
+      // A submodule's git folder kept inside the clone's own.
+      fs.mkdirSync(path.join(vpc, ".git", "modules"));
+      try {
+        assert.ok(codes(await checkOf(infra)).includes("NESTED_CHECKOUT"), ".git/modules");
+      } finally {
+        fs.rmSync(path.join(vpc, ".git", "modules"), { recursive: true });
+      }
+      assert.deepEqual(codes(await checkOf(infra)), []);
+    });
+
     await check("a local tag, a hidden edit or a config of its own makes a module a checkout, and git never runs there", async () => {
       // A commit only a local tag holds.
       git(vpc, ["checkout", "-q", "--detach"]);
