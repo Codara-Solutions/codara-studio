@@ -12,6 +12,8 @@ import { isAncestor } from "./git-worktrees";
 //   the caller named), or its merge commit is in the default branch, or in
 //   its base branch as the remote has it now, or in the head of a merged pull
 //   request of its base branch that itself landed, following the stack up.
+//   A base the caller names as exact-tip only (a long-lived branch such as
+//   staging) counts through its remote copy only for a head that is the tip.
 //
 // It fails closed. A commit git does not have locally is no proof, a pull
 // request merged into a branch that later lost that merge (force-pushed) or
@@ -41,6 +43,13 @@ export interface StackProofInput {
   defaultCommit: string | null;
   /** A branch's commit on the remote now; null when it is gone or unknown. */
   remoteCommit?(branch: string): Promise<string | null>;
+  /**
+   * Bases whose copy on the remote proves only the worktree's own pull
+   * request, merged straight into it with exactly the tip as its head: a
+   * long-lived branch (staging) is not this worktree's, so neither a tip
+   * behind the head nor a stack through it is tied to the merge.
+   */
+  exactTipBases?: ReadonlySet<string>;
 }
 
 export interface StackProof {
@@ -90,7 +99,8 @@ export async function proveByMergedPullRequestStack(input: StackProofInput): Pro
     if (!merged) return null;
     if (input.defaultCommit && (await contains(merged, input.defaultCommit))) return { via: [], landedIn: { kind: "default" } };
     // A base still on the remote that holds the merge.
-    const live = await (input.remoteCommit?.(base) ?? Promise.resolve(null)).catch(() => null);
+    const asked = !input.exactTipBases?.has(base) || (depth === 0 && pr.headRefOid.toLowerCase() === tip);
+    const live = asked ? await (input.remoteCommit?.(base) ?? Promise.resolve(null)).catch(() => null) : null;
     if (live && OID.test(live) && (await contains(merged, live))) {
       return { via: [], landedIn: { kind: "remote-base", branch: base, commit: live.toLowerCase() } };
     }

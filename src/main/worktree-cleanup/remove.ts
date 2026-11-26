@@ -53,6 +53,7 @@ import {
   usageUnknown,
   countsAsUse,
   finishedWork,
+  longLivedTargetRefusal,
   heldByMaker,
   isAtOrUnder,
   usageOf,
@@ -320,6 +321,8 @@ async function changedWhileAside(
   if ((await worktreeFingerprint(aside, undefined, fingerprintRegenerable(aside, ctx.regenerable))) !== before) {
     return "It changed while it was being removed, so it was put back.";
   }
+  const lost = await longLivedTargetRefusal(ctx.repo.root, check.merge, ctx.repo.base?.name ?? null);
+  if (lost) return `${lost} So it was put back.`;
   const realAside = await canonicalPath(aside);
   const usage = await usageContext(ctx.deps, [realAside]);
   if (ctx.requireKnownUsage && usageUnknown(usage)) {
@@ -547,9 +550,15 @@ async function removeOne(
   let kept: WorktreeKeptBranch | undefined;
   if (check.branch) {
     const tip = await revParse(repo.root, `refs/heads/${check.branch}`);
+    // A folder already gone was never moved aside, so staging's merge is
+    // asked about here, right before its branch could go.
+    const lost =
+      tip && outcome.status === "already-removed"
+        ? await longLivedTargetRefusal(repo.root, check.merge, repo.base?.name ?? null)
+        : null;
     if (!tip) {
       // Nothing left to keep or delete.
-    } else if (check.unmerged || check.merge.state === "unmerged" || check.merge.state === "unknown") {
+    } else if (lost || check.unmerged || check.merge.state === "unmerged" || check.merge.state === "unknown") {
       outcome.branchKept = "unmerged";
       kept = {
         repoRoot: repo.root,
