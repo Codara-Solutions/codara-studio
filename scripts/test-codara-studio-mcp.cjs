@@ -342,28 +342,32 @@ function sortedEqual(actual, expected, label) {
     // does it (the coordinator or its background subagent).
     assert.match(
       studio.init.instructions,
-      /To work on another repository, or to hand one to a background subagent, call it with workspace .*instead of running git worktree add/,
+      /codara_worktree_create, never git worktree add; for another repository, or one you hand to a background subagent, pass workspace/,
       "an agent learns to make another repository's worktree through Codara",
     );
     assert.match(
       studio.init.instructions,
-      /reports with worktree set to its path: the note shows on that worktree's row/,
+      /set worktree to its path: the note shows on that worktree's row/,
       "an agent learns where a subagent's milestone notes go",
     );
     assert.match(studio.init.instructions, /awaiting-approval waits for the user to approve its commands; never run them, or the setup file's terminal commands, yourself/);
     assert.match(
       studio.init.instructions,
-      /Codara shows .* whether you are working, need the user or are done, by itself\. codara_workspace_status adds a one-line note to your own line.*at each milestone/,
+      /Your line in the rail shows by itself whether you are working, need the user or are done\. At each milestone add a one-line note to it with codara_workspace_status/,
       "a terminal agent learns its state is shown for it and it only adds milestone notes",
     );
     assert.match(
       studio.init.instructions,
-      /Task list: .*codara_task_add.*verify\.json checks run then and alone close it.*needs_you with one plain sentence/,
+      /Task list .*codara_task_add.*Only the repo's checks close it.*needs_you with one plain sentence/,
       "a terminal agent learns that only the repo's checks close a task",
     );
     assert.match(
+      studio.definitions.find((tool) => tool.name === "codara_task_update").description,
+      /verifying runs the repo's \.codara\/verify\.json checks, which alone close a task/,
+    );
+    assert.match(
       studio.init.instructions,
-      /codara_workspace_status.*note at each milestone.*blocked/,
+      /milestone.*codara_workspace_status: .*why you are blocked/,
       "a terminal agent learns to say in its rail note why it is blocked",
     );
     assert.match(studio.init.instructions, /Dev servers: .*codara_terminal_servers.*keeps them running when you exit or restart/, "dev servers go to the keeper, not the agent's own shell");
@@ -375,8 +379,8 @@ function sortedEqual(actual, expected, label) {
     assert.doesNotMatch(studio.init.instructions, /baseRevision/, "chat-only guidance stays out of a terminal session");
     // Agents use the user's own Chrome through the extension, in their
     // workspace's tab group, and never start a browser of their own.
-    assert.match(studio.init.instructions, /use codara_preview_chrome open; the tab lands in this workspace's tab group/);
-    assert.match(studio.init.instructions, /local dev servers the in-app browser \(codara_preview_navigate\) stays the default/);
+    assert.match(studio.init.instructions, /use their Chrome: codara_preview_chrome open \(the tab joins this workspace's tab group\)/);
+    assert.match(studio.init.instructions, /Local dev servers stay in the in-app browser\. If Chrome is not connected/);
     assert.match(studio.init.instructions, /Never launch a separate browser or Chrome window: no chrome-devtools-mcp, Playwright or puppeteer windows, no google-chrome or xdg-open/);
     assert.notStrictEqual(studio.init.serverInfo.version, "0.1.0", "serverInfo reports Codara's version");
     const legacyClient = await listTools(undefined, {}, { protocolVersion: "2024-11-05" });
@@ -649,6 +653,31 @@ function sortedEqual(actual, expected, label) {
         assert.ok(!("runId" in (tool.inputSchema.properties || {})), `${tool.name} must not expose runId`);
       }
     }
+    // Claude Code shows a model only the first 4,096 characters of a server's
+    // instructions (2,048 before v2.1.296) and silently drops the rest, so
+    // every roster's text stays under 4,000 and what makes an agent show or
+    // tell the user something comes first, inside the older 2,048.
+    const INSTRUCTIONS_LIMIT = 4_000;
+    for (const [label, roster] of Object.entries({ ...rosters, directMemory, untrustedDirect, legacyClient })) {
+      const text = roster.init.instructions;
+      assert.ok(
+        text.length <= INSTRUCTIONS_LIMIT,
+        `${label} instructions are ${text.length} chars, over ${INSTRUCTIONS_LIMIT}: Claude Code would cut the end off`,
+      );
+    }
+    const paragraphs = studio.init.instructions.split("\n\n");
+    const userFacing = /codara_open_file|codara_share_offer|codara_notify_user|codara_workspace_status/;
+    const firstOther = paragraphs.findIndex((paragraph, index) => index > 0 && !userFacing.test(paragraph));
+    assert.deepStrictEqual(
+      paragraphs.map((paragraph, index) => (userFacing.test(paragraph) ? index : null)).filter((index) => index !== null),
+      [1, 2, 3, 4],
+      "the open-file, share, notify and rail paragraphs follow the opening line",
+    );
+    assert.ok(firstOther > 4, "no tool paragraph comes before the user-facing ones");
+    assert.ok(
+      paragraphs.slice(0, 5).join("\n\n").length <= 2_048,
+      "the user-facing paragraphs fit inside the 2,048 characters older Claude Code keeps",
+    );
     const byName = (roster, name) => roster.definitions.find((tool) => tool.name === name);
     assert.strictEqual(byName(studio, "codara_terminal_read").annotations.readOnlyHint, true);
     assert.strictEqual(byName(studio, "codara_terminal_close").annotations.destructiveHint, true);
