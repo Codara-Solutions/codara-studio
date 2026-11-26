@@ -59,7 +59,6 @@ export const CI_WATCH_IDLE_AFTER_MS = 10 * 60_000;
 export const CI_WATCH_OPEN_REQUERY_MS = 60_000;
 export const CI_WATCH_SETTLED_REQUERY_MS = 15 * 60_000;
 export const CI_WATCH_ERROR_BACKOFF_MS = 10 * 60_000;
-export const CI_WATCH_MAX_WORKSPACES = 24;
 // Checks queued forever (a runner that never comes) would otherwise cost a
 // read a minute for as long as the pull request is open.
 export const CI_WATCH_PENDING_GRACE_MS = 10 * 60_000;
@@ -167,6 +166,18 @@ interface WorkspaceTrack {
   changedAt: number;
   /** The pull request ("owner/name#N") whose failure an agent may be waiting to hear about. */
   nudging: { repository: string; number: number } | null;
+}
+
+/** A row whose pull request is to be read this pass. */
+interface DueRead {
+  cwd: string;
+  group: Workspace[];
+  ids: string[];
+  refs: CiLocalRefs;
+  repositoryOn: boolean;
+  now: number;
+  track: WorkspaceTrack | undefined;
+  moved: boolean;
 }
 
 interface PullRequestTrack {
@@ -382,13 +393,16 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
     if (!since) since = deps.now();
     const state = await deps.loadState();
     const byCwd = new Map<string, Workspace[]>();
-    const local = state.workspaces.filter((workspace) => !isRemotePath(workspace.cwd)).slice(0, CI_WATCH_MAX_WORKSPACES);
+    // Every local row: one with no upstream costs a git call a tick and no
+    // GitHub call.
+    const local = state.workspaces.filter((workspace) => !isRemotePath(workspace.cwd));
     for (const workspace of local) {
       const same = byCwd.get(workspace.cwd);
       if (same) same.push(workspace);
       else byCwd.set(workspace.cwd, [workspace]);
     }
     const rows = new Set<string>();
+    const due: DueRead[] = [];
     for (const [cwd, group] of byCwd) {
       const ids = group.map((workspace) => workspace.id);
       for (const id of ids) rows.add(id);
@@ -416,76 +430,93 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
       // New refs are asked about at once; otherwise after an error's backoff,
       // or when the pull request is due another look.
       const moved = !track || track.refs !== refs.key || track.on !== repositoryOn;
-      const due = moved || (track.retryAt ? now >= track.retryAt : now - track.queriedAt >= track.interval);
-      if (!due) continue;
-      let pr: CiPullRequestSnapshot | null;
-      try {
-        pr = await deps.readPullRequest(cwd, refs);
-      } catch (cause) {
-        // Once per streak of errors, not every retry.
-        if (!track?.retryAt) {
-          deps.log(`could not read the pull request of ${group[0].name}: ${cause instanceof Error ? cause.message : String(cause)}`);
-        }
-        workspaces.set(cwd, {
-          refs: refs.key,
-          queriedAt: now,
-          interval: wait.open,
-          fingerprint: track?.fingerprint ?? "",
-          retryAt: now + wait.error,
-          on: repositoryOn,
-          repository: refs.repository,
-          changedAt: track?.changedAt ?? now,
-          nudging: track?.nudging ?? null,
-        });
-        continue;
-      }
-      const fingerprint = fingerprintOf(pr);
-      const open = pr !== null && (pr.phase === "open" || pr.phase === "draft");
-      const quiet = !moved && track!.fingerprint === fingerprint && !track!.retryAt;
-      const changedAt = quiet ? track!.changedAt : now;
-      let interval = wait.settled;
-      if (open) {
-        // Nothing new since the last look: wait twice as long, up to the
-        // settled interval. Running checks are asked every minute for a while
-        // first: they usually finish within minutes.
-        const running = pr!.pending > 0 && now - changedAt < CI_WATCH_PENDING_GRACE_MS;
-        interval = quiet && !running ? Math.min(track!.interval * 2, wait.settled) : wait.open;
-      }
-      const next: WorkspaceTrack = { refs: refs.key, queriedAt: now, interval, fingerprint, retryAt: 0, on: repositoryOn, repository: refs.repository, changedAt, nudging: null };
-      workspaces.set(cwd, next);
-      if (!pr) {
-        show(ids, repositoryOn ? null : switchedOff);
-        continue;
-      }
-      if (open && observe(group[0], pr, refs.branch, repositoryOn)) next.nudging = { repository: pr.repository, number: pr.number };
-      else if (!open) deps.nudger?.settled(pr.repository, pr.number);
-      if (!repositoryOn) {
-        show(ids, switchedOff);
-        continue;
-      }
-      // The row's repository is the remote's, which is what the switch is
-      // keyed on; a fork's pull request or a renamed repository can differ.
-      show(ids, (workspaceId) => ({
-        workspaceId,
-        repository: refs.repository,
-        watching: true,
-        pullRequest: {
-          workspaceId,
-          repository: pr!.repository.toLowerCase(),
-          number: pr!.number,
-          url: pr!.url,
-          title: pr!.title,
-          phase: pr!.phase,
-          checks: open ? checksOf(pr!) : "none",
-          failed: open ? pr!.failed : [],
-          headOid: pr!.headOid,
-        },
-      }));
+      const isDue = moved || (track.retryAt ? now >= track.retryAt : now - track.queriedAt >= track.interval);
+      if (!isDue) continue;
+      due.push({ cwd, group, ids, refs, repositoryOn, now, track, moved });
     }
+    // Every due row is read at once (the reader paces its GitHub calls), and
+    // each is applied as soon as its answer is back: a slow read holds up no
+    // other row, and a passing result withdraws a queued line at once.
+    await Promise.all(
+      due.map(async (row) => {
+        const pr = await deps.readPullRequest(row.cwd, row.refs).catch((cause: unknown) => (cause instanceof Error ? cause : new Error(String(cause))));
+        // One row's failure ends neither the pass nor the other rows: the
+        // pass is over only once every row is.
+        try {
+          apply(row, pr);
+        } catch (cause) {
+          deps.log(`could not apply the pull request of ${row.group[0].name}: ${cause instanceof Error ? cause.message : String(cause)}`);
+        }
+      }),
+    );
     for (const cwd of [...workspaces.keys()]) if (!byCwd.has(cwd)) workspaces.delete(cwd);
     unwatchRefs((cwd) => workspaces.has(cwd) || byCwd.has(cwd));
     retainNudges();
     show([...shown.keys()].filter((id) => !rows.has(id)), null);
+  }
+
+  function apply({ cwd, group, ids, refs, repositoryOn, now, track, moved }: DueRead, pr: CiPullRequestSnapshot | null | Error): void {
+    // Turned off while the read was out.
+    if (!deps.enabled()) return;
+    const switchedOff = (workspaceId: string): PullRequestWatchEntry => ({ workspaceId, repository: refs.repository, watching: false });
+    if (pr instanceof Error) {
+      // Once per streak of errors, not every retry.
+      if (!track?.retryAt) deps.log(`could not read the pull request of ${group[0].name}: ${pr.message}`);
+      workspaces.set(cwd, {
+        refs: refs.key,
+        queriedAt: now,
+        interval: wait.open,
+        fingerprint: track?.fingerprint ?? "",
+        retryAt: now + wait.error,
+        on: repositoryOn,
+        repository: refs.repository,
+        changedAt: track?.changedAt ?? now,
+        nudging: track?.nudging ?? null,
+      });
+      return;
+    }
+    const fingerprint = fingerprintOf(pr);
+    const open = pr !== null && (pr.phase === "open" || pr.phase === "draft");
+    const quiet = !moved && track!.fingerprint === fingerprint && !track!.retryAt;
+    const changedAt = quiet ? track!.changedAt : now;
+    let interval = wait.settled;
+    if (open) {
+      // Nothing new since the last look: wait twice as long, up to the
+      // settled interval. Running checks are asked every minute for a while
+      // first: they usually finish within minutes.
+      const running = pr!.pending > 0 && now - changedAt < CI_WATCH_PENDING_GRACE_MS;
+      interval = quiet && !running ? Math.min(track!.interval * 2, wait.settled) : wait.open;
+    }
+    const next: WorkspaceTrack = { refs: refs.key, queriedAt: now, interval, fingerprint, retryAt: 0, on: repositoryOn, repository: refs.repository, changedAt, nudging: null };
+    workspaces.set(cwd, next);
+    if (!pr) {
+      show(ids, repositoryOn ? null : switchedOff);
+      return;
+    }
+    if (open && observe(group[0], pr, refs.branch, repositoryOn)) next.nudging = { repository: pr.repository, number: pr.number };
+    else if (!open) deps.nudger?.settled(pr.repository, pr.number);
+    if (!repositoryOn) {
+      show(ids, switchedOff);
+      return;
+    }
+    // The row's repository is the remote's, which is what the switch is
+    // keyed on; a fork's pull request or a renamed repository can differ.
+    show(ids, (workspaceId) => ({
+      workspaceId,
+      repository: refs.repository,
+      watching: true,
+      pullRequest: {
+        workspaceId,
+        repository: pr!.repository.toLowerCase(),
+        number: pr!.number,
+        url: pr!.url,
+        title: pr!.title,
+        phase: pr!.phase,
+        checks: open ? checksOf(pr!) : "none",
+        failed: open ? pr!.failed : [],
+        headOid: pr!.headOid,
+      },
+    }));
   }
 
   function schedule(ms: number): void {
@@ -544,7 +575,11 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
 // ── Reading a pull request from GitHub's REST API ───────────────────────────
 
 const SUCCESS_STATES = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
-const FAILED_STATES = new Set(["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"]);
+// STALE: GitHub gave up on a required check, which still blocks the merge.
+const FAILED_STATES = new Set(["FAILURE", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"]);
+// A run cancelled (by hand, or because a newer run of it started) did not
+// fail: no failure to tell anyone about, and nothing still running either.
+const SETTLED_STATES = new Set(["CANCELLED"]);
 
 // GitHub writes 0001-01-01T00:00:00Z for a time it does not have.
 function githubTime(value: unknown): number {
@@ -630,6 +665,7 @@ export function summarizeRestChecks(
   let failedAt = 0;
   let pending = 0;
   let passed = 0;
+  const cancelled: Record<string, unknown>[] = [];
   for (const check of latestCheckContexts(contexts)) {
     const signal = [check.conclusion, check.state, check.status].find((part) => typeof part === "string" && part) as string | undefined;
     const name = String(check.name || check.context || "check").replace(/\s+/g, " ").slice(0, 80);
@@ -638,8 +674,15 @@ export function summarizeRestChecks(
       failed.push(name);
       failedAt = Math.max(failedAt, githubTime(check.completedAt) || githubTime(check.startedAt));
     } else if (upper && SUCCESS_STATES.has(upper)) passed += 1;
+    else if (upper && SETTLED_STATES.has(upper)) cancelled.push(check);
     else pending += 1;
   }
+  // A cancelled run no newer run of the same name replaced (in this suite or
+  // another) leaves that check unproven: never "passing", so no green note.
+  const timeOf = (check: Record<string, unknown>) => githubTime(check.startedAt) || githubTime(check.completedAt);
+  const replaced = (check: Record<string, unknown>) =>
+    contexts.some((other) => other.name === check.name && other.conclusion !== "CANCELLED" && timeOf(other) > timeOf(check));
+  if (cancelled.some((check) => !replaced(check))) passed = 0;
   return { failed, failedAt, pending, passed };
 }
 
@@ -808,6 +851,89 @@ export function ghConfigDir(home: string): string {
   return `${process.env.XDG_CONFIG_HOME || `${home}/.config`}/gh`;
 }
 
+// Rows whose branch is looked up at once, and open pull requests whose
+// checks are read at once. Apart, so a row whose pull request is merged or
+// closed (no checks to read) never waits behind slow check reads.
+export const CI_WATCH_LOOKUPS_AT_ONCE = 3;
+export const CI_WATCH_CACHED_PATHS = 1200;
+export const CI_WATCH_CHECK_READS_AT_ONCE = 3;
+
+type Lane = <T>(task: () => Promise<T>) => Promise<T>;
+
+function lane(size: number): Lane {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  return async (task) => {
+    // A freed place goes straight to the next in line, so a newcomer
+    // arriving in between cannot take it too.
+    if (active >= size) await new Promise<void>((resolve) => waiting.push(resolve));
+    else active += 1;
+    try {
+      return await task();
+    } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else active -= 1;
+    }
+  };
+}
+
+export interface PullRequestReadLanes {
+  lookup: Lane;
+  checks: Lane;
+}
+
+export function pullRequestReadLanes(lookups = CI_WATCH_LOOKUPS_AT_ONCE, checks = CI_WATCH_CHECK_READS_AT_ONCE): PullRequestReadLanes {
+  return { lookup: lane(lookups), checks: lane(checks) };
+}
+
+type PullRequestReader = { get(path: string, options?: { jq?: string }): Promise<{ value: unknown }> };
+
+// `owner:branch`: the owner in any case, the branch exactly (GitHub's head
+// filter is looser than that).
+function sameHead(label: unknown, owner: string, branch: string): boolean {
+  const value = text(label);
+  const colon = value.indexOf(":");
+  return colon > 0 && value.slice(0, colon).toLowerCase() === owner.toLowerCase() && value.slice(colon + 1) === branch;
+}
+
+/**
+ * GitHubCiWatchDeps.readPullRequest over GitHub's REST API: the branch's
+ * newest pull request (on the parent when the branch was pushed to the
+ * user's fork), then the checks of an open one. The lookup and the check
+ * reads each wait for a free place in their own lane.
+ */
+export async function readBranchPullRequest(
+  reader: PullRequestReader,
+  refs: CiLocalRefs,
+  lanes: PullRequestReadLanes,
+): Promise<CiPullRequestSnapshot | null> {
+  const [owner] = refs.repository.split("/");
+  const pullsIn = async (repository: string) => {
+    const value = (await reader.get(`repos/${repository}/pulls?head=${encodeURIComponent(`${owner}:${refs.branch}`)}&state=all&per_page=5`)).value;
+    return Array.isArray(value) ? value.filter((item) => sameHead(record(record(item)?.head)?.label, owner, refs.branch)) : value;
+  };
+  const pull = await lanes.lookup(async () => {
+    const own = parseRestPullRequest(await pullsIn(refs.repository));
+    if (own) return own;
+    // A branch pushed to the user's fork has its pull request on the parent.
+    const repo = record((await reader.get(`repos/${refs.repository}`, { jq: "{fork, parent: .parent.full_name}" })).value);
+    const parent = repo?.fork === true ? normalizeRepository(repo.parent) : null;
+    return parent ? parseRestPullRequest(await pullsIn(parent)) : null;
+  });
+  if (!pull) return null;
+  if (pull.phase === "merged" || pull.phase === "closed") return { ...pull, failed: [], failedAt: 0, pending: 0, passed: 0 };
+  // Checks live on the repository the pull request is in.
+  const base = `repos/${pull.repository}`;
+  const [runs, status] = await lanes.checks(() =>
+    Promise.all([
+      reader.get(`${base}/commits/${pull.headOid}/check-runs?per_page=100`, { jq: CHECK_RUNS_JQ }),
+      reader.get(`${base}/commits/${pull.headOid}/status?per_page=100`),
+    ]),
+  );
+  return { ...pull, ...summarizeRestChecks(runs.value, status.value) };
+}
+
 async function productionDeps(): Promise<{ deps: GitHubCiWatchDeps; stop: () => void }> {
   const [
     { powerMonitor, webContents },
@@ -852,16 +978,21 @@ async function productionDeps(): Promise<{ deps: GitHubCiWatchDeps; stop: () => 
     }
   };
   const readers = new Map<string, ReturnType<typeof conditional.createConditionalGitHubReader>>();
+  const lanes = pullRequestReadLanes();
   const readerFor = (executablePath: string, host: string) => {
     let reader = readers.get(host);
     if (!reader) {
-      reader = conditional.createConditionalGitHubReader((args) =>
-        github.runGitHubCliCommand({
-          executablePath,
-          args: host === "github.com" ? args : [...args.slice(0, 1), "--hostname", host, ...args.slice(1)],
-          timeoutMs: github.GITHUB_CLI_READ_TIMEOUT_MS,
-          maxOutputBytes: github.GITHUB_CLI_MAX_OUTPUT_BYTES,
-        }),
+      reader = conditional.createConditionalGitHubReader(
+        (args) =>
+          github.runGitHubCliCommand({
+            executablePath,
+            args: host === "github.com" ? args : [...args.slice(0, 1), "--hostname", host, ...args.slice(1)],
+            timeoutMs: github.GITHUB_CLI_READ_TIMEOUT_MS,
+            maxOutputBytes: github.GITHUB_CLI_MAX_OUTPUT_BYTES,
+          }),
+        // Every row is watched: about three paths per open pull request, and
+        // a path pushed out costs a full read instead of a free 304.
+        CI_WATCH_CACHED_PATHS,
       );
       readers.set(host, reader);
     }
@@ -981,27 +1112,8 @@ async function productionDeps(): Promise<{ deps: GitHubCiWatchDeps; stop: () => 
       // Without gh there is nothing to watch; asked again in 15 minutes.
       const executablePath = await resolveBinary("gh");
       if (!executablePath) return null;
-      const reader = readerFor(executablePath, refs.host);
-      const [owner] = refs.repository.split("/");
-      const pullsIn = (repository: string) =>
-        reader.get(`repos/${repository}/pulls?head=${encodeURIComponent(`${owner}:${refs.branch}`)}&state=all&per_page=5`);
       try {
-        let pull = parseRestPullRequest((await pullsIn(refs.repository)).value);
-        if (!pull) {
-          // A branch pushed to the user's fork has its pull request on the parent.
-          const repo = record((await reader.get(`repos/${refs.repository}`, { jq: "{fork, parent: .parent.full_name}" })).value);
-          const parent = repo?.fork === true ? normalizeRepository(repo.parent) : null;
-          if (parent) pull = parseRestPullRequest((await pullsIn(parent)).value);
-        }
-        if (!pull) return null;
-        if (pull.phase === "merged" || pull.phase === "closed") return { ...pull, failed: [], failedAt: 0, pending: 0, passed: 0 };
-        // Checks live on the repository the pull request is in.
-        const base = `repos/${pull.repository}`;
-        const [runs, status] = await Promise.all([
-          reader.get(`${base}/commits/${pull.headOid}/check-runs?per_page=100`, { jq: CHECK_RUNS_JQ }),
-          reader.get(`${base}/commits/${pull.headOid}/status?per_page=100`),
-        ]);
-        return { ...pull, ...summarizeRestChecks(runs.value, status.value) };
+        return await readBranchPullRequest(readerFor(executablePath, refs.host), refs, lanes);
       } catch (cause) {
         throw new Error(github.sanitizeGitHubFailure(cause, "gh failed"));
       }

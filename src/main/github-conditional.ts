@@ -57,7 +57,7 @@ export interface ConditionalGitHubReader {
 
 const MAX_CACHED_PATHS = 300;
 
-export function createConditionalGitHubReader(run: GhApiRunner): ConditionalGitHubReader {
+export function createConditionalGitHubReader(run: GhApiRunner, maxCachedPaths = MAX_CACHED_PATHS): ConditionalGitHubReader {
   const cache = new Map<string, { etag: string; value: unknown }>();
 
   return {
@@ -96,7 +96,7 @@ export function createConditionalGitHubReader(run: GhApiRunner): ConditionalGitH
       cache.delete(key);
       if (etag) {
         cache.set(key, { etag, value });
-        while (cache.size > MAX_CACHED_PATHS) cache.delete(cache.keys().next().value as string);
+        while (cache.size > maxCachedPaths) cache.delete(cache.keys().next().value as string);
       }
       return { value, notModified: false };
     },
