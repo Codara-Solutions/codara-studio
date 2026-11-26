@@ -55,6 +55,10 @@ of suites by area). `CONTRIBUTING.md` covers setup and pull requests.
   `PR hygiene` check fails without the `large-pr` label. Cut the branch from
   the base you open it against, or the check fails on the merged commits it
   carries.
+- Open the pull request as a draft and push to it freely: CI, CI (Linux) and
+  Budgets skip drafts (Gitleaks and PR hygiene still run). Mark it ready when
+  the work is done; the full CI starts then, and a newer push cancels the
+  older run.
 
 ## Releases
 

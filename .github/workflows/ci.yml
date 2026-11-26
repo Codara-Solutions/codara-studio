@@ -14,16 +14,22 @@ name: CI
 # time budget that fails it with the slowest suites named, long before the job
 # timeout would cancel it. "test" is the required check and only reports the
 # parts.
+#
+# A draft pull request runs nothing here: every job is skipped until it is
+# marked ready (ready_for_review), which starts the full run.
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer push to a pull request replaces its run. Every other run (main,
+  # dispatch) is its own group, so none is cancelled or dropped from a queue.
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -31,6 +37,7 @@ permissions:
 jobs:
   test-pool:
     name: test (pool ${{ matrix.shard }}/${{ strategy.job-total }})
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: macos-latest
     timeout-minutes: 30
     strategy:
@@ -67,6 +74,7 @@ jobs:
 
   test-serial:
     name: test (serial, typecheck)
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -90,11 +98,14 @@ jobs:
         run: npm run test:all
 
   test:
+    # A skipped required check counts as passed, so on a draft this job is
+    # skipped under another name: the pull request has no "test" check until
+    # it is marked ready, and a missing required check blocks the merge.
+    name: ${{ github.event.pull_request.draft && 'test (skipped, draft)' || 'test' }}
     needs: [test-pool, test-serial]
-    # A skipped required check counts as passed, so this job must run and fail
-    # whenever any part did not succeed: failures, timeouts and
-    # cancellations included.
-    if: ${{ always() }}
+    # Otherwise this job must run and fail whenever any part did not succeed:
+    # failures, timeouts and cancellations included.
+    if: ${{ always() && !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
