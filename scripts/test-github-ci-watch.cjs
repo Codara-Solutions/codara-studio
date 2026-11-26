@@ -975,6 +975,156 @@ test("timers: every five minutes while nobody uses the computer; shorter waits w
   fast.stop();
 });
 
+// ── Every row, each applied as read ────────────────────────────────────────
+
+test("every local row with an upstream is watched, not the first 24", async ({ mod }) => {
+  const workspaces = Array.from({ length: 30 }, (_, i) => ws(`ws-${i}`, `/repo-${i}`));
+  const refs = Object.fromEntries(workspaces.map((w, i) => [w.cwd, `h${i} u${i}`]));
+  const prs = Object.fromEntries(workspaces.map((w, i) => [w.cwd, pr(HEAD_A, { number: 100 + i })]));
+  const h = harness(mod, { workspaces, refs, prs });
+  await h.pass();
+  const shown = new Map(h.watch.entries().map((entry) => [entry.workspaceId, entry.pullRequest?.number]));
+  assert.equal(shown.size, 30);
+  assert.equal(shown.get("ws-29"), 129, "the thirtieth row shows its own pull request");
+});
+
+test("a row is applied as soon as its read is back, whatever a slow row does", async ({ mod }) => {
+  const rows = [ws("ws-slow", "/slow"), ws("ws-fast", "/fast"), ws("ws-broken", "/broken")];
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  const logs = [];
+  const watch = mod.createGitHubCiWatch({
+    loadState: async () => ({ workspaces: rows, workspaceGroups: [], activeWorkspaceId: null }),
+    enabled: () => true,
+    pathExists: async () => true,
+    localRefs: async (cwd) => ({ key: `${cwd} u`, host: "github.com", repository: "acme/widgets", branch: `feat${cwd}` }),
+    readPullRequest: async (cwd) => {
+      if (cwd === "/slow") await held;
+      if (cwd === "/broken") throw new Error("gh: HTTP 502");
+      return pr(HEAD_A, { number: cwd === "/fast" ? 7 : 8 });
+    },
+    publish: () => undefined,
+    rearm: () => undefined,
+    now: () => 0,
+    setTimeout: () => ({}),
+    clearTimeout: () => undefined,
+    log: (message) => logs.push(message),
+  });
+  const passing = watch.runPass();
+  for (let i = 0; i < 20; i += 1) await Promise.resolve();
+  const shown = () => new Map(watch.entries().map((entry) => [entry.workspaceId, entry.pullRequest?.number]));
+  assert.equal(shown().get("ws-fast"), 7, "the fast row is shown while the slow one reads");
+  assert.equal(shown().has("ws-slow"), false);
+  assert.equal(logs.filter((line) => line.includes("ws-broken")).length, 1, "a failed read errs only its own row");
+  release();
+  await passing;
+  assert.equal(shown().get("ws-slow"), 8);
+  assert.equal(shown().has("ws-broken"), false);
+});
+
+// ── Reading one branch over REST ────────────────────────────────────────────
+
+function restReader(routes) {
+  const calls = [];
+  return {
+    calls,
+    get: async (url) => {
+      calls.push(url);
+      for (const [pattern, answer] of routes) if (url.includes(pattern)) return { value: typeof answer === "function" ? await answer(url) : answer };
+      throw new Error(`unexpected ${url}`);
+    },
+  };
+}
+
+function refsFor(branch, repository = "acme/widgets") {
+  return { key: "k", host: "github.com", repository, branch };
+}
+
+test("readBranchPullRequest takes the branch's own pull request, exactly, and a fork's parent's", async ({ mod }) => {
+  const lanes = mod.pullRequestReadLanes();
+  const labelled = (number, label, extra = {}) => pull({ number, html_url: `https://github.com/acme/widgets/pull/${number}`, head: { sha: HEAD_A, label }, ...extra });
+  // GitHub's head filter also hands back feat/Widgets and another owner's branch.
+  const reader = restReader([
+    ["pulls?head=", [labelled(9, "acme:feat/Widgets"), labelled(8, "someone:feat/widgets"), labelled(3, "ACME:feat/widgets", { state: "closed" })]],
+  ]);
+  const own = await mod.readBranchPullRequest(reader, refsFor("feat/widgets"), lanes);
+  assert.equal(own.number, 3, "the owner in any case, the branch exactly");
+  assert.equal(own.phase, "closed");
+  assert.equal(reader.calls.some((url) => url.includes("/check-runs")), false, "a closed one has no checks to read");
+  const none = await mod.readBranchPullRequest(restReader([["pulls?head=", [labelled(9, "acme:feat/Widgets")]], ["repos/acme/widgets", { fork: false }]]), refsFor("feat/widgets"), lanes);
+  assert.equal(none, null, "another branch's pull request is not this one's");
+  const fork = restReader([
+    ["repos/acme/widgets/pulls?head=", []],
+    ["repos/upstream/widgets/pulls?head=", [pull({ number: 40, html_url: "https://github.com/upstream/widgets/pull/40", head: { sha: HEAD_A, label: "acme:feat/widgets" } })]],
+    ["/check-runs", { check_runs: [run("build", "completed", "success")] }],
+    ["/status", { statuses: [] }],
+    ["repos/acme/widgets", { fork: true, parent: "upstream/widgets" }],
+  ]);
+  const forked = await mod.readBranchPullRequest(fork, refsFor("feat/widgets"), lanes);
+  assert.equal(forked.repository, "upstream/widgets");
+  assert.equal(forked.passed, 1);
+  assert.ok(fork.calls.some((url) => url.startsWith("repos/upstream/widgets/commits/")), "checks are read where the pull request is");
+});
+
+test("readBranchPullRequest: a merged or closed row never waits behind slow check reads", async ({ mod }) => {
+  const lanes = mod.pullRequestReadLanes(3, 3);
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  let checking = 0;
+  let mostChecking = 0;
+  const labelled = (branch, extra = {}) => [pull({ head: { sha: HEAD_A, label: `acme:${branch}` }, ...extra })];
+  const reader = restReader([
+    ["feat%2Fdone", labelled("feat/done", { state: "closed", merged_at: "2026-11-20T10:00:00Z" })],
+    ["pulls?head=", (url) => labelled(decodeURIComponent(/head=acme%3A([^&]+)/.exec(url)[1]))],
+    [
+      "/check-runs",
+      async () => {
+        checking += 1;
+        mostChecking = Math.max(mostChecking, checking);
+        await held;
+        checking -= 1;
+        return { check_runs: [] };
+      },
+    ],
+    ["/status", { statuses: [] }],
+  ]);
+  const open = Array.from({ length: 5 }, (_, i) => mod.readBranchPullRequest(reader, refsFor(`feat/open-${i}`), lanes));
+  for (let i = 0; i < 40; i += 1) await Promise.resolve();
+  let done = null;
+  const merged = mod.readBranchPullRequest(reader, refsFor("feat/done"), lanes).then((value) => (done = value));
+  for (let i = 0; i < 40; i += 1) await Promise.resolve();
+  assert.equal(done?.phase, "merged", "answered while every check read hangs");
+  assert.equal(mostChecking, 3, "no more check reads at once than the lane holds");
+  release();
+  await Promise.all([...open, merged]);
+  assert.equal(mostChecking, 3);
+});
+
+test("a cancelled run is no failure, a stale required one is; the newest run of a check decides", ({ mod }) => {
+  const view = (runs) => mod.summarizeRestChecks({ check_runs: runs }, null);
+  const at = (minute) => `2026-10-01T10:${String(minute).padStart(2, "0")}:00Z`;
+  assert.deepEqual(view([run("build", "completed", "cancelled")]), { failed: [], failedAt: 0, pending: 0, passed: 0 });
+  assert.deepEqual(view([run("build", "completed", "stale"), run("lint", "completed", "success")]).failed, ["build"], "a stale required check still blocks");
+  // Superseded: the run of another suite was cancelled when the newer one started.
+  const cancelled = { ...run("build", "completed", "cancelled", { started: at(0), completed: at(2) }), check_suite: { id: 1 } };
+  const passing = { ...run("build", "completed", "success", { started: at(1), completed: at(6) }), check_suite: { id: 2 } };
+  assert.deepEqual(view([cancelled, passing]), { failed: [], failedAt: 0, pending: 0, passed: 1 });
+  // A newer run that failed again: still failing.
+  const failedAgain = run("build", "completed", "failure", { started: at(10), completed: at(12) });
+  assert.deepEqual(view([run("build", "completed", "cancelled", { started: at(5) }), failedAgain]).failed, ["build"]);
+});
+
+test("a pull request whose only bad run was cancelled prompts no one", async ({ mod }) => {
+  const summary = mod.summarizeRestChecks({ check_runs: [run("build", "completed", "cancelled"), run("lint", "completed", "success")] }, null);
+  const h = harness(mod, { prs: { "/repo": pr(HEAD_A, { passed: 1 }) } });
+  await h.pass();
+  h.prs["/repo"] = { ...pr(HEAD_B, summary), failedAt: Date.now() };
+  h.refs["/repo"] = "h2 u2";
+  await h.pass();
+  assert.deepEqual(h.published.filter((entry) => entry.kind === "git.ci-failed"), []);
+  assert.deepEqual(h.failing, []);
+});
+
 // ── Runner ──────────────────────────────────────────────────────────────────
 
 (async () => {

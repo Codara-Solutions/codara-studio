@@ -101,7 +101,7 @@ async function prepare(): Promise<Fixture> {
   const now = new Date().toISOString();
   const rest = (number: number, title: string, branch: string, head: string) =>
     JSON.stringify([
-      { number, title, html_url: `https://github.com/acme/widgets/pull/${number}`, state: "open", draft: false, merged_at: null, head: { sha: head, ref: branch } },
+      { number, title, html_url: `https://github.com/acme/widgets/pull/${number}`, state: "open", draft: false, merged_at: null, head: { sha: head, ref: branch, label: `acme:${branch}` } },
     ]);
   const runs = (conclusion: string) =>
     JSON.stringify({ total_count: 1, check_runs: [{ name: "build", status: "completed", conclusion, started_at: now, completed_at: now }] });

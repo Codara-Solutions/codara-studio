@@ -214,7 +214,7 @@ async function prepare(): Promise<Fixture> {
         state: "open",
         draft: false,
         merged_at: null,
-        head: { sha: head, ref: "feat/widgets" },
+        head: { sha: head, ref: "feat/widgets", label: "acme:feat/widgets" },
       },
     ]),
     "utf8",
