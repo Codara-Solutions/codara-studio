@@ -239,11 +239,11 @@ test("direct main pushes run release checks before the next nightly", () => {
   assert.equal(pool.strategy["fail-fast"], false);
 });
 
-// On 26 Nov every push to a draft ran all three heavy workflows, 24 runs each,
-// against a 50 dollar a month Actions budget.
+// On 26 Nov every push to a draft ran all three heavy workflows in full, 24
+// runs each.
 test("heavy workflows skip drafts, start on ready and only cancel pull request runs", () => {
   const dir = path.join(__dirname, "../.github/workflows");
-  for (const name of ["ci.yml", "ci-linux.yml", "budgets.yml"]) {
+  for (const [name, prefix] of [["ci.yml", "ci"], ["ci-linux.yml", "ci-linux"], ["budgets.yml", "budgets"]]) {
     const workflow = yaml.load(fs.readFileSync(path.join(dir, name), "utf8"));
     assert.deepEqual(workflow.on.pull_request.types, ["opened", "synchronize", "reopened", "ready_for_review"], name);
     for (const [id, job] of Object.entries(workflow.jobs)) {
@@ -252,7 +252,8 @@ test("heavy workflows skip drafts, start on ready and only cancel pull request r
     // main and dispatch runs each get their own group: a shared one would
     // drop a queued main run when a third arrives, even without cancelling.
     assert.equal(workflow.concurrency["cancel-in-progress"], "${{ github.event_name == 'pull_request' }}", name);
-    assert.match(workflow.concurrency.group, /-\$\{\{ github\.event_name \}\}-\$\{\{ github\.event\.pull_request\.number \|\| github\.run_id \}\}$/, name);
+    // A prefix of its own: two workflows in one group would cancel each other.
+    assert.equal(workflow.concurrency.group, `${prefix}-\${{ github.event_name }}-\${{ github.event.pull_request.number || github.run_id }}`, name);
   }
   // "test" is required, and a skipped required check counts as passed: on a
   // draft the gate is skipped under another name, so no "test" check exists.
