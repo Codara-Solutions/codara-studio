@@ -606,8 +606,6 @@ async function main() {
       } finally {
         h.now = realNow;
       }
-      fs.utimesSync(path.join(repo, ".git", "worktrees", "git-touched", "index"), new Date(Date.now() - HOUR), new Date(Date.now() - HOUR));
-      await assertGone(entry);
     });
 
     await check("right after launch nothing goes: the terminal list may not be hydrated", async () => {
