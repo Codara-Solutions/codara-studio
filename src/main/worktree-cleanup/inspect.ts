@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, promises as fsp } from "node:fs";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { isRemotePath } from "@shared/remote";
 import { isDefaultTabTitle } from "@shared/tab-default-titles";
 import type { AppState, CopyBranchCreator, RunState, Workspace } from "@shared/types";
@@ -114,6 +114,9 @@ export interface WorktreeCleanupDeps {
   // How long a pane has had no input or output, in ms; null when it cannot
   // say. Absent or null: never idle.
   paneIdleMs?(paneId: string): number | null;
+  // When an agent in one of these workspaces, or working in one of these
+  // folders, last had a turn (now while one runs); null when none did.
+  lastAgentTurnAt?(workspaceIds: readonly string[], dirs: readonly string[]): number | null;
   // Where the ignored files of a removed worktree are kept. Absent: they are
   // not kept, so a removal that would delete them is asked about.
   archiveRoot?(): string;
@@ -831,6 +834,54 @@ export async function lastActivity(path: string, head: string | null, root: stri
   if (head) {
     const seconds = Number(await readGitText(root, ["log", "-1", "--format=%ct", head]));
     if (Number.isFinite(seconds) && seconds > 0) times.push(seconds * 1000);
+  }
+  return times.length ? Math.max(...times) : null;
+}
+
+// More changed files than this and their times are not read one by one.
+const WORK_PATHS_READ = 200;
+
+/**
+ * When someone last worked in it, for "idle N days", the rail's 7-day stale
+ * rule and the advice: its last commit, the newest file git lists as
+ * changed or new, and the last turn of an agent in it. Not git's own index,
+ * logs/HEAD and HEAD, which a status or a fetch rewrites with nobody there;
+ * the rules that hold a removal right after a touch keep those
+ * (lastActivity). Anything it cannot read (the status, the commit, a
+ * changed file, too many changed files) is null: unknown, so nothing reads
+ * as idle on a guess.
+ */
+export async function lastWorkAt(
+  path: string,
+  head: string | null,
+  root: string,
+  agentTurnAt: number | null,
+  status?: StatusCounts | null,
+): Promise<number | null> {
+  let changed = status === undefined ? await readStatus(path, "normal").catch(() => null) : status;
+  // A new folder is listed once, and editing a file inside it leaves the
+  // folder's time alone: list the files in it.
+  if (changed?.untracked.some((entry) => entry.endsWith("/"))) changed = await readStatus(path, "all").catch(() => null);
+  if (!changed) return null;
+  const paths = [...changed.tracked, ...changed.untracked];
+  if (paths.length > WORK_PATHS_READ) return null;
+  const times: number[] = agentTurnAt ? [agentTurnAt] : [];
+  if (head) {
+    const seconds = Number(await readGitText(root, ["log", "-1", "--format=%ct", head]));
+    if (!Number.isFinite(seconds) || seconds <= 0) return null;
+    times.push(seconds * 1000);
+  }
+  for (const entry of paths) {
+    // A deleted file or folder leaves the time of the nearest folder still there.
+    let at = join(path, entry);
+    let stat = await fsp.lstat(at).catch(() => null);
+    while (!stat && at.length > path.length) {
+      at = dirname(at);
+      stat = await fsp.lstat(at).catch(() => null);
+    }
+    if (!stat) return null;
+    // A chmod or a rename moves only ctime.
+    times.push(Math.max(stat.mtimeMs, stat.ctimeMs));
   }
   return times.length ? Math.max(...times) : null;
 }
