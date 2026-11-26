@@ -27,6 +27,7 @@ import {
 } from "../agent-worktrees";
 import { deleteBranchIfAt } from "../git-branches";
 import { errorText, readGitText, runGit } from "../git-exec";
+import { heldText } from "../worktree-setup/links";
 import {
   dropMissingWorktreeRegistration,
   isRegisteredWorktree,
@@ -360,7 +361,10 @@ async function removeOne(
     branchDeleted: false,
   };
   let removedLinks: Array<{ path: string; text: string }> | undefined;
-  const audit = (result: "removed" | "refused", extra: { code?: string; recoveryRef?: string | null } = {}) =>
+  const audit = (
+    result: "removed" | "refused",
+    extra: { code?: string; recoveryRef?: string | null; held?: Array<{ path: string; held: string }> } = {},
+  ) =>
     deps
       .audit({
         action: "remove",
@@ -377,6 +381,7 @@ async function removeOne(
         blockers: check.blockers.map((entry) => entry.code),
         recoveryRef: extra.recoveryRef ?? null,
         ...(removedLinks ? { links: removedLinks } : {}),
+        ...(extra.held?.length ? { heldLinks: extra.held } : {}),
       })
       .catch(() => undefined);
   const refuse = async (code: WorktreeCleanupOutcome["code"], message: string): Promise<RemovalWork> => {
@@ -495,16 +500,18 @@ async function removeOne(
       await audit("refused", { code: "ARCHIVE_FAILED", recoveryRef });
       return { outcome: { ...outcome, status: "refused", code: "ARCHIVE_FAILED", message: archiveError }, dropWorkspaces: [] };
     }
+    // Every held link stays named: the message is cut only past them.
+    const failure = removed.ok ? "" : cleanText(removed.error, 400 + heldText(removed.held ?? []).length);
     if (!removed.ok && removed.changed) {
-      await audit("refused", { code: "CHANGED", recoveryRef });
-      return { outcome: { ...outcome, status: "refused", code: "CHANGED", message: cleanText(removed.error, 400) }, dropWorkspaces: [] };
+      await audit("refused", { code: "CHANGED", recoveryRef, held: removed.held });
+      return { outcome: { ...outcome, status: "refused", code: "CHANGED", message: failure }, dropWorkspaces: [] };
     }
     if (!removed.ok) {
       // The recovery refs stay. git deletes files before it gives up on
       // one it cannot delete, and it drops the worktree's registration even
       // then, so after a failure the refs may be the only copy of the last
       // commit and of the uncommitted work. They expire like the others.
-      await audit("refused", { code: "GIT_FAILED", recoveryRef });
+      await audit("refused", { code: "GIT_FAILED", recoveryRef, held: removed.held });
       const left = (await fsp.lstat(check.path).catch(() => null)) !== null;
       const partly = left && !(await isRegisteredWorktree(repo.root, check.path));
       return {
@@ -513,7 +520,7 @@ async function removeOne(
           status: "failed",
           code: "GIT_FAILED",
           message: [
-            cleanText(removed.error, 400),
+            failure,
             partly ? "git removed part of the folder; delete the rest by hand." : null,
             outcome.message ?? null,
           ]

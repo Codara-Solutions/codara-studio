@@ -2805,7 +2805,13 @@ export type GitRemoveWorktreeResult =
       /** The user's node_modules links that went with the folder, as each read. */
       links?: Array<{ path: string; text: string }>;
     }
-  | { ok: false; error: string; changed?: true };
+  | {
+      ok: false;
+      error: string;
+      changed?: true;
+      /** The user's node_modules links that stayed held beside it, and where. */
+      held?: Array<{ path: string; held: string }>;
+    };
 
 // Result of git:createCopyWorktree. Shared so renderer + main agree on shape.
 // mode "fork" = new branch created from baseBranch (baseBranch present);

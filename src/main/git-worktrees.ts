@@ -7,7 +7,15 @@ import type { GitCopyWorktreeResult, GitOpResult, GitRemoveWorktreeResult } from
 import { gitChildEnv } from "./git-env";
 import { errorText, readGitText, runGit } from "./git-exec";
 import { parseWorktreePorcelain, type WorktreeRegistration } from "./git-worktree-porcelain";
-import { discardHeldLinks, heldText, isDependencyLink, prepareWorktreeRemoval, restoreWorktreeLinks } from "./worktree-setup/links";
+import {
+  discardHeldLinks,
+  type HeldLink,
+  HeldLinksError,
+  heldText,
+  isDependencyLink,
+  prepareWorktreeRemoval,
+  restoreWorktreeLinks,
+} from "./worktree-setup/links";
 import { reservedDirNames, rowFolders } from "./worktree-folders";
 
 export type { WorktreeRegistration };
@@ -533,6 +541,24 @@ export function asidePathFor(worktreePath: string): string {
 interface AsideNote {
   original: string;
   aside: string;
+  /** The user's links held beside it for the removal, put back with it. */
+  links?: HeldLink[];
+}
+
+// Held links a note names: only entries this removal made, in the holding
+// folder beside the original (releaseWorktreeLinks); anything else is no
+// held link of Studio's and is never touched.
+function notedLinks(note: AsideNote, value: unknown): HeldLink[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return null;
+  const prefix = `${resolve(note.original)}.links-`;
+  const links: HeldLink[] = [];
+  for (const entry of value) {
+    const { path, held } = (entry ?? {}) as Partial<HeldLink>;
+    if (typeof path !== "string" || typeof held !== "string" || !held.startsWith(prefix) || resolve(held) !== held) return null;
+    links.push({ path, held });
+  }
+  return links;
 }
 
 async function asideNotesDir(repoCwd: string): Promise<string> {
@@ -571,19 +597,32 @@ export async function restoreAsideWorktrees(repoCwd: string): Promise<{ restored
     let note: AsideNote | null = null;
     try {
       const parsed = JSON.parse(await readFile(join(dir!, name), "utf8")) as Partial<AsideNote>;
-      if (typeof parsed.original === "string" && typeof parsed.aside === "string") note = parsed as AsideNote;
+      if (typeof parsed.original === "string" && typeof parsed.aside === "string") {
+        const links = notedLinks(parsed as AsideNote, parsed.links);
+        if (links) note = { original: parsed.original, aside: parsed.aside, links };
+      }
     } catch {
       note = null;
     }
     if (!note || asideNoteName(note.aside) !== name) continue;
+    // The held links go back into the folder wherever it is now. Any that
+    // cannot (the folder deleted, something in their place) are named once.
+    const linksInto = async (where: string | null) => {
+      const noted = note!.links ?? [];
+      const asLinks = noted.map((link) => ({ path: link.path, target: "", held: link.held }));
+      const kept = where ? await restoreWorktreeLinks(where, asLinks).catch(() => noted) : noted;
+      stuck.push(...kept.map((link) => `${link.held} (the link ${link.path})`));
+    };
     if (await pathIsAbsent(note.aside)) {
       // Deleted, or already back: nothing is left aside.
+      await linksInto((await pathIsAbsent(note.original)) ? null : note.original);
       await clearAsideNote(repoCwd, note.aside);
       continue;
     }
     const back = await putBackAside(repoCwd, note.aside, note.original);
     if (back.ok) restored.push(note.original);
     else stuck.push(note.aside);
+    await linksInto(back.ok ? note.original : note.aside);
   }
   return { restored, stuck };
 }
@@ -913,28 +952,35 @@ export async function removeCopyWorktree(
   try {
     releasedLinks = await prepareWorktreeRemoval(original, await untrackedDependencyLinks(original));
   } catch (err) {
-    return { ok: false, error: errorText(err) };
+    return err instanceof HeldLinksError && err.held.length
+      ? { ok: false, error: errorText(err), held: err.held }
+      : { ok: false, error: errorText(err) };
   }
-  // A link that could not go back, something being in its place, is named.
+  // A link that could not go back, something being in its place, is named,
+  // and listed in the result (`held`) so no cut message can lose it.
+  let held: HeldLink[] = [];
   const linksBack = async (where: string): Promise<string> => {
     // A put-back that threw may have left any of them held: all are named.
-    const kept = await restoreWorktreeLinks(where, releasedLinks).catch(() =>
-      releasedLinks.flatMap((link) => (link.held ? [link.held] : [])),
+    held = await restoreWorktreeLinks(where, releasedLinks).catch(() =>
+      releasedLinks.flatMap((link) => (link.held ? [{ path: link.path, held: link.held }] : [])),
     );
-    return heldText(kept);
+    return heldText(held);
   };
+  const withHeld = (result: { ok: false; error: string; changed?: true }): GitRemoveWorktreeResult =>
+    held.length ? { ...result, held } : result;
   let work = input;
   if (input.aside) {
     const aside = asidePathFor(original);
     const fail = async (error: string, changed = false): Promise<GitRemoveWorktreeResult> => {
       error += await linksBack(original);
-      return changed ? { ok: false, changed: true, error } : { ok: false, error };
+      return withHeld(changed ? { ok: false, changed: true, error } : { ok: false, error });
     };
     if (!(await pathIsAbsent(aside))) {
       return fail(`Another folder is where it would be moved aside: ${aside}. Move it away, then try again.`);
     }
     try {
-      await noteAside(input.repoCwd, { original: resolve(original), aside });
+      const links = releasedLinks.flatMap((link) => (link.held ? [{ path: link.path, held: link.held }] : []));
+      await noteAside(input.repoCwd, { original: resolve(original), aside, ...(links.length ? { links } : {}) });
     } catch (err) {
       return fail(`Its move aside could not be noted: ${errorText(err)}`);
     }
@@ -959,7 +1005,7 @@ export async function removeCopyWorktree(
       const back = await putBackAside(input.repoCwd, aside, original);
       if (!back.ok) {
         // It stays where it was moved: its links come back there.
-        return { ok: false, changed: true, error: `${reason} ${back.error}${await linksBack(aside)}` };
+        return withHeld({ ok: false, changed: true, error: `${reason} ${back.error}${await linksBack(aside)}` });
       }
       return fail(reason, true);
     }
@@ -986,7 +1032,7 @@ export async function removeCopyWorktree(
   }
   if (!removed) {
     const stuck = await putBack();
-    return { ok: false, error: `${lastError}${stuck}${await linksBack(stuck ? work.worktreePath : original)}` };
+    return withHeld({ ok: false, error: `${lastError}${stuck}${await linksBack(stuck ? work.worktreePath : original)}` });
   }
 
   await discardHeldLinks(releasedLinks).catch(() => undefined);

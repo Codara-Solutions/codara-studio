@@ -186,6 +186,8 @@ export interface AgentWorktreeAuditEntry {
   message?: string | null;
   /** The user's node_modules links that went with a removed folder, as each read. */
   links?: Array<{ path: string; text: string }>;
+  /** The user's node_modules links a failed removal left held, and where. */
+  heldLinks?: Array<{ path: string; held: string }>;
 }
 
 export interface AgentWorktreeDeps {
@@ -3765,8 +3767,10 @@ async function removeLocked(
     if (!removed.ok && archiveError) {
       return refusal("WORKTREE_ARCHIVE_FAILED", archiveError, { workspaceId: workspace.id, recoveryRef });
     }
+    // Held links are listed apart from the message, which may be cut.
+    const heldLinks = !removed.ok && removed.held?.length ? { heldLinks: removed.held } : {};
     if (!removed.ok && removed.changed) {
-      return refusal("WORKTREE_CHANGED", removed.error, { workspaceId: workspace.id, recoveryRef });
+      return refusal("WORKTREE_CHANGED", removed.error, { workspaceId: workspace.id, recoveryRef, ...heldLinks });
     }
     if (!removed.ok) {
       // The recovery ref stays. git deletes files before it gives up on one
@@ -3777,6 +3781,7 @@ async function removeLocked(
         workspaceId: workspace.id,
         path: workspace.cwd,
         recoveryRef,
+        ...heldLinks,
       });
     }
     // The user's own node_modules links went with it: what each read is
@@ -4264,6 +4269,7 @@ export function createWorktreeAuditLog(
       ...(entry.message ? { message: cleanText(entry.message, 300) } : {}),
       // Verbatim, every one: what a removed link read is the one record of it.
       ...(entry.links?.length ? { links: entry.links.map((link) => ({ path: link.path, text: link.text })) } : {}),
+      ...(entry.heldLinks?.length ? { heldLinks: entry.heldLinks.map((link) => ({ path: link.path, held: link.held })) } : {}),
     });
     const write = chain.then(async () => {
       await fsp.mkdir(dirname(file), { recursive: true });

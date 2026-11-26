@@ -251,7 +251,7 @@ async function main() {
       fs.symlinkSync("../gone/node_modules", path.join(dir, "node_modules"));
       const released = await links.prepareWorktreeRemoval(dir, ["node_modules"]);
       fs.writeFileSync(path.join(dir, "node_modules"), "new\n");
-      assert.deepEqual(await links.restoreWorktreeLinks(dir, released), [released[0].held]);
+      assert.deepEqual(await links.restoreWorktreeLinks(dir, released), [{ path: "node_modules", held: released[0].held }]);
       assert.equal(fs.readFileSync(path.join(dir, "node_modules"), "utf8"), "new\n", "the new file stays");
       assert.equal(fs.readlinkSync(released[0].held), "../gone/node_modules", "the link is kept where it was held");
     });
@@ -288,6 +288,9 @@ async function main() {
 
     // Two links; the second is swapped for a file while it is taken out, and
     // something is made where the first was, so the first cannot go back.
+    // The held paths an error names ("<link> at <where>", every one).
+    const heldIn = (message) =>
+      (/ Its node_modules links are kept: (.+)\.$/.exec(message)?.[1]?.split("; ") ?? []).map((entry) => entry.split(" at ")[1]);
     const twoLinks = (name) => {
       const dir = path.join(scratch, name);
       fs.mkdirSync(path.join(dir, "a"), { recursive: true });
@@ -314,8 +317,9 @@ async function main() {
       );
       assert.ok(err, "the removal stops");
       assert.match(err.message, /b\/node_modules changed while it was being taken out/);
-      const held = /kept at (.+)\.$/.exec(err.message)?.[1]?.split(", ") ?? [];
-      assert.equal(held.length, 1, err.message);
+      const held = heldIn(err.message);
+      assert.deepEqual(err.held.map((link) => link.path), ["a/node_modules"], "the link is named, apart from the message too");
+      assert.deepEqual(held, err.held.map((link) => link.held), err.message);
       assert.equal(fs.readlinkSync(held[0]), packages, "the first link, named where it is held");
       assert.equal(fs.readFileSync(second, "utf8"), "swapped\n", "the swapped file went back");
       assert.equal(fs.readFileSync(path.join(dir, "a", "node_modules"), "utf8"), "made since\n");
@@ -337,8 +341,9 @@ async function main() {
       );
       assert.ok(err, "the removal stops");
       assert.match(err.message, /Could not take out the linked folder b\/node_modules/);
-      const held = /kept at (.+)\.$/.exec(err.message)?.[1]?.split(", ") ?? [];
-      assert.equal(held.length, 1, err.message);
+      const held = heldIn(err.message);
+      assert.deepEqual(err.held.map((link) => link.path), ["a/node_modules"], "the link is named, apart from the message too");
+      assert.deepEqual(held, err.held.map((link) => link.held), err.message);
       assert.equal(fs.readlinkSync(held[0]), packages);
       assert.equal(fs.readlinkSync(second), packages, "the second link never moved");
     });
@@ -380,6 +385,99 @@ async function main() {
       const many = Array.from({ length: 60 }, (_, i) => ({ path: `p${i}/node_modules`, text: `../x\u0007‮${i}/${"y".repeat(1_200)}` }));
       await log({ action: "remove", outcome: "removed", caller: { role: "user" }, repo, workspaceId: null, path: "/tmp/fake", links: many });
       assert.deepEqual(readAudit(file).at(-1).links, many);
+    });
+
+    await check("a link whose text is no UTF-8 stays a new file", async () => {
+      const dir = path.join(scratch, "latin1");
+      fs.mkdirSync(dir, { recursive: true });
+      try {
+        fs.symlinkSync(Buffer.from([0x2e, 0x2e, 0x2f, 0x63, 0x61, 0x66, 0xe9]), path.join(dir, "node_modules"));
+      } catch {
+        return; // a file system that refuses such a name has no such link
+      }
+      assert.equal(await links.isDependencyLink(dir, "node_modules"), false, "read back it would point elsewhere");
+      assert.deepEqual(await links.prepareWorktreeRemoval(dir, ["node_modules"]).catch(() => "refused"), "refused");
+      assert.equal(fs.lstatSync(path.join(dir, "node_modules")).isSymbolicLink(), true, "it stays where it was");
+    });
+
+    await check("every held link is named on the cleanup screen and in the audit, however long git's message", async () => {
+      const dir = add(`held-${"x".repeat(60)}`, "feat/held");
+      for (const name of ["pkg-a", "pkg-b", "pkg-c"]) {
+        fs.mkdirSync(path.join(dir, name));
+        fs.symlinkSync(packages, path.join(dir, name, "node_modules"), "dir");
+      }
+      const entry = await checkOf(dir);
+      assert.deepEqual(codes(entry), [], JSON.stringify(entry.blockers));
+      const real = deps.processesUnderCwds;
+      // Once it is aside, files take the links' places: git refuses them
+      // and the links cannot go back.
+      deps.processesUnderCwds = async (dirs) => {
+        for (const where of dirs) {
+          if (!path.basename(where).endsWith(".codara-removing")) continue;
+          for (const name of ["pkg-a", "pkg-b", "pkg-c"]) fs.writeFileSync(path.join(where, name, "node_modules"), "made since\n");
+        }
+        return real(dirs);
+      };
+      let result;
+      try {
+        result = await removeIt(dir, entry.fingerprint);
+      } finally {
+        deps.processesUnderCwds = real;
+      }
+      assert.notEqual(result.status, "removed", JSON.stringify(result));
+      assert.equal(fs.existsSync(dir), true, "the folder stays");
+      const named = ["pkg-a", "pkg-b", "pkg-c"].map((name) => `${name}/node_modules at `);
+      for (const entry of named) assert.ok(result.message.includes(entry), `${entry} in: ${result.message}`);
+      const held = readAudit(auditFile).filter((line) => line.path === dir && line.outcome === "refused").pop()?.heldLinks ?? [];
+      assert.deepEqual(held.map((link) => link.path), ["pkg-a/node_modules", "pkg-b/node_modules", "pkg-c/node_modules"]);
+      for (const link of held) assert.equal(fs.readlinkSync(link.held), packages, "each is held where it is named");
+      packagesIntact();
+    });
+
+    await check("links held when Studio stopped mid-removal come back with the folder", async () => {
+      const dir = add("crashed", "feat/crashed");
+      fs.symlinkSync("../somewhere/node_modules", path.join(dir, "node_modules"));
+      const notes = path.join(git(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]), "codara-aside");
+      let noted = null;
+      // The recheck never answers: Studio stopped with the folder aside.
+      const stopped = gitWorktrees.removeCopyWorktree({
+        repoCwd: repo,
+        worktreePath: dir,
+        branch: "feat/crashed",
+        removeOrphanDir: false,
+        aside: {
+          recheck: () => {
+            noted = fs.readdirSync(notes).map((name) => JSON.parse(fs.readFileSync(path.join(notes, name), "utf8")));
+            return new Promise(() => {});
+          },
+        },
+      });
+      void stopped;
+      for (let i = 0; i < 200 && !noted; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.ok(noted, "it got as far as the move aside");
+      assert.equal(fs.existsSync(dir), false, "the folder is aside, its link held");
+      assert.deepEqual(noted.flatMap((note) => (note.links ?? []).map((link) => link.path)), ["node_modules"], "the note names the held link");
+      const back = await gitWorktrees.restoreAsideWorktrees(repo);
+      assert.deepEqual(back, { restored: [dir], stuck: [] });
+      assert.equal(fs.readlinkSync(path.join(dir, "node_modules")), "../somewhere/node_modules", "the link is back as it read");
+      assert.deepEqual(fs.readdirSync(trees).filter((name) => name.startsWith("crashed.links-")), [], "nothing held is left");
+    });
+
+    await check("a note naming a held link outside its holding folder is no note of Studio's", async () => {
+      const notes = path.join(git(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]), "codara-aside");
+      const original = path.join(trees, "forged");
+      const aside = path.join(trees, ".forged.codara-removing");
+      const elsewhere = path.join(scratch, "someone-else.txt");
+      fs.mkdirSync(aside, { recursive: true });
+      fs.writeFileSync(elsewhere, "theirs\n");
+      const name = `${require("node:crypto").createHash("sha256").update(aside).digest("hex").slice(0, 24)}.json`;
+      fs.mkdirSync(notes, { recursive: true });
+      fs.writeFileSync(path.join(notes, name), JSON.stringify({ original, aside, links: [{ path: "node_modules", held: elsewhere }] }));
+      const back = await gitWorktrees.restoreAsideWorktrees(repo);
+      assert.deepEqual(back, { restored: [], stuck: [] }, "it is not acted on");
+      assert.equal(fs.readFileSync(elsewhere, "utf8"), "theirs\n");
+      assert.equal(fs.existsSync(aside), true);
+      fs.rmSync(path.join(notes, name));
     });
 
     // ── The agent path ─────────────────────────────────────────────────────

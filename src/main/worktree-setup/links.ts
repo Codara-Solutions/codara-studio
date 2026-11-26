@@ -36,6 +36,22 @@ export interface SetupManifestLink {
   held?: string;
 }
 
+/** A user's link held for a removal and not put back: which one, and where it is. */
+export interface HeldLink {
+  path: string;
+  held: string;
+}
+
+/** A removal stopped before git ran; `held` lists the links that stayed held. */
+export class HeldLinksError extends Error {
+  constructor(
+    message: string,
+    readonly held: HeldLink[],
+  ) {
+    super(message + heldText(held));
+  }
+}
+
 export interface SetupManifest {
   version: 1;
   sourceRoot: string;
@@ -193,6 +209,10 @@ export async function isDependencyLink(worktreePath: string, relative: string): 
     fsp.realpath(dirname(absolute)).catch(() => null),
   ]);
   if (!root || !parent || (parent !== root && !parent.startsWith(root.endsWith(sep) ? root : root + sep))) return false;
+  // Its text must read back byte for byte: one that is no UTF-8 would be
+  // made again (and logged) as something else.
+  const raw = await fsp.readlink(absolute, { encoding: "buffer" }).catch(() => null);
+  if (!raw || !Buffer.from(raw.toString("utf8"), "utf8").equals(raw)) return false;
   return (await linkTarget(absolute)) !== null;
 }
 
@@ -244,11 +264,12 @@ export async function releaseWorktreeLinks(worktreePath: string, dependencyLinks
     const moved = await fsp.lstat(held).catch(() => null);
     const text = moved?.isSymbolicLink() ? await fsp.readlink(held).catch(() => null) : null;
     if (!moved || moved.ino !== before.ino || moved.dev !== before.dev || text !== pointsAt) {
-      const kept = (await putBackNoReplace(held, absolute)) ? [] : [held];
+      const kept: HeldLink[] = (await putBackNoReplace(held, absolute)) ? [] : [{ path, held }];
       kept.push(...(await restoreWorktreeLinks(worktreePath, released)));
       if (!kept.length) await fsp.rmdir(holding).catch(() => undefined);
-      throw new Error(
-        `${path} changed while it was being taken out before removing the worktree, so nothing was removed.${heldText(kept)}`,
+      throw new HeldLinksError(
+        `${path} changed while it was being taken out before removing the worktree, so nothing was removed.`,
+        kept,
       );
     }
     released.push({ path, target, exact: pointsAt, held });
@@ -295,8 +316,9 @@ export async function prepareWorktreeRemoval(worktreePath: string, dependencyLin
     if (!safeRelative(path)) continue;
     if (await linkMayRemain(join(worktreePath, ...path.split("/")))) {
       const kept = await restoreWorktreeLinks(worktreePath, released);
-      throw new Error(
-        `Could not take out the linked folder ${path} before removing the worktree. Close what uses it, then try again.${heldText(kept)}`,
+      throw new HeldLinksError(
+        `Could not take out the linked folder ${path} before removing the worktree. Close what uses it, then try again.`,
+        kept,
       );
     }
   }
@@ -304,18 +326,18 @@ export async function prepareWorktreeRemoval(worktreePath: string, dependencyLin
 }
 
 /**
- * Puts back links released for a removal that then failed. Returns where
- * each held link stayed because something took its place.
+ * Puts back links released for a removal that then failed. Returns the
+ * held links that stayed held because something took their place.
  */
-export async function restoreWorktreeLinks(worktreePath: string, links: readonly SetupManifestLink[]): Promise<string[]> {
-  const kept: string[] = [];
+export async function restoreWorktreeLinks(worktreePath: string, links: readonly SetupManifestLink[]): Promise<HeldLink[]> {
+  const kept: HeldLink[] = [];
   for (const link of links) {
     if (!safeRelative(link.path)) continue;
     const absolute = join(worktreePath, ...link.path.split("/"));
     if (link.held) {
       // The link itself comes back, never over anything; else it stays held.
       if (await putBackNoReplace(link.held, absolute)) await fsp.rmdir(dirname(link.held)).catch(() => undefined);
-      else kept.push(link.held);
+      else kept.push({ path: link.path, held: link.held });
       continue;
     }
     if (await fsp.lstat(absolute).catch(() => null)) continue;
@@ -330,9 +352,9 @@ export async function restoreWorktreeLinks(worktreePath: string, links: readonly
   return kept;
 }
 
-/** Where held links stayed, for an error: every one, so none is lost track of. */
-export function heldText(kept: readonly string[]): string {
-  return kept.length ? ` Its node_modules links are kept at ${kept.join(", ")}.` : "";
+/** Which links stayed held and where, for an error: every one, so none is lost track of. */
+export function heldText(kept: readonly HeldLink[]): string {
+  return kept.length ? ` Its node_modules links are kept: ${kept.map((link) => `${link.path} at ${link.held}`).join("; ")}.` : "";
 }
 
 /** Once the worktree is gone: deletes the user's links held for its removal (the links, never what they point at). */
