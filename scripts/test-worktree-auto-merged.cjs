@@ -431,8 +431,14 @@ async function main() {
       const recent = worktree("recently-used", { createdAt: new Date(Date.now() + 5_000).toISOString() });
       h.now = new Date(Date.now() + 8 * DAY);
       try {
+        // git rewrites its own HEAD, index and logs with nobody there.
         fs.utimesSync(path.join(repo, ".git", "worktrees", "recently-used", "HEAD"), h.now, h.now);
+        assert.equal((await stateOf(recent.id)).stale, true, "git's own files are no work");
+        const draft = path.join(recent.dir, "draft.txt");
+        fs.writeFileSync(draft, "work\n");
+        fs.utimesSync(draft, h.now, h.now);
         assert.equal((await stateOf(recent.id)).stale, undefined, "used lately is not stale");
+        fs.rmSync(draft);
       } finally {
         h.now = realNow;
       }
@@ -587,6 +593,19 @@ async function main() {
       assert.equal((await stateOf(entry.id, shorter)).autoRemoveMerged, undefined, "a longer window holds it");
       await assertStays(entry, /too recently/, shorter);
       await assertGone(entry);
+    });
+
+    await check("git's own files touched a moment ago still hold it: the quiet rule keeps the cautious clock", async () => {
+      const entry = mergedWorktree("git-touched");
+      const realNow = h.now;
+      h.now = new Date(Date.now() + 3 * HOUR);
+      try {
+        // Commits are hours old; only git's index moved, as a status run does.
+        fs.utimesSync(path.join(repo, ".git", "worktrees", "git-touched", "index"), h.now, h.now);
+        await assertStays(entry, /too recently/);
+      } finally {
+        h.now = realNow;
+      }
     });
 
     await check("right after launch nothing goes: the terminal list may not be hydrated", async () => {

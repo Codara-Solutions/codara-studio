@@ -16,7 +16,7 @@ import {
   ROW_CONCURRENCY,
   canonicalPath,
   discoverRepos,
-  lastActivity,
+  lastWorkAt,
   linkWorkspaces,
   linkedWorkspaceOf,
   mapLimited,
@@ -31,6 +31,7 @@ import {
   withBudget,
   type MergeFacts,
   type RepoContext,
+  type StatusCounts,
   type UsageContext,
   type WorktreeCleanupDeps,
 } from "./inspect";
@@ -93,9 +94,10 @@ async function rowFor(
   const missing = !existsSync(entry.path);
   const warnings: string[] = [];
   let dirty: WorktreeCleanupRow["dirty"] = null;
+  let status: StatusCounts | null = null;
   if (!missing) {
     try {
-      const status = await readStatus(entry.path, "normal");
+      status = await readStatus(entry.path, "normal");
       dirty = {
         tracked: status.tracked.length,
         untracked: status.untracked.length,
@@ -129,7 +131,7 @@ async function rowFor(
       ? head
         ? Number(await readGitText(repo.root, ["log", "-1", "--format=%ct", head])) * 1000 || null
         : null
-      : await lastActivity(entry.path, head, repo.root),
+      : await lastWorkAt(entry.path, head, repo.root, usage.deps.lastAgentTurnAt?.(workspaces.map((workspace) => workspace.id), [entry.path, real]) ?? null, status),
     dirty,
     upstream: tracking?.upstream
       ? { name: tracking.upstream, ahead: tracking.ahead, behind: tracking.behind, gone: tracking.gone }
