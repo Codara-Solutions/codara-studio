@@ -611,7 +611,8 @@ export async function restoreAsideWorktrees(repoCwd: string): Promise<{ restored
       const noted = note!.links ?? [];
       const asLinks = noted.map((link) => ({ path: link.path, target: "", held: link.held }));
       const kept = where ? await restoreWorktreeLinks(where, asLinks).catch(() => noted) : noted;
-      stuck.push(...kept.map((link) => `${link.held} (the link ${link.path})`));
+      // One an earlier restore put back is held nowhere now: not named.
+      for (const link of kept) if (!(await pathIsAbsent(link.held))) stuck.push(`${link.held} (the link ${link.path})`);
     };
     if (await pathIsAbsent(note.aside)) {
       // Deleted, or already back: nothing is left aside.
@@ -950,7 +951,9 @@ export async function removeCopyWorktree(
   // setup is stopped by the folder's own name, before any move.
   let releasedLinks: Awaited<ReturnType<typeof prepareWorktreeRemoval>>;
   try {
-    releasedLinks = await prepareWorktreeRemoval(original, await untrackedDependencyLinks(original));
+    // The user's own links are taken out only where the removal notes and
+    // audits them (aside); other callers leave them to git, as before.
+    releasedLinks = await prepareWorktreeRemoval(original, input.aside ? await untrackedDependencyLinks(original) : []);
   } catch (err) {
     return err instanceof HeldLinksError && err.held.length
       ? { ok: false, error: errorText(err), held: err.held }

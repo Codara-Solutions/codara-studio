@@ -500,8 +500,15 @@ async function removeOne(
       await audit("refused", { code: "ARCHIVE_FAILED", recoveryRef });
       return { outcome: { ...outcome, status: "refused", code: "ARCHIVE_FAILED", message: archiveError }, dropWorkspaces: [] };
     }
-    // Every held link stays named: the message is cut only past them.
-    const failure = removed.ok ? "" : cleanText(removed.error, 400 + heldText(removed.held ?? []).length);
+    // Every held link stays named: the message before them is cut, never
+    // they, however long the part before is.
+    let failure = "";
+    if (!removed.ok) {
+      const named = cleanText(heldText(removed.held ?? []), Infinity);
+      const error = cleanText(removed.error, Infinity);
+      const before = named && error.endsWith(named) ? error.slice(0, -named.length) : error;
+      failure = [cleanText(before, 400), named].filter(Boolean).join(" ");
+    }
     if (!removed.ok && removed.changed) {
       await audit("refused", { code: "CHANGED", recoveryRef, held: removed.held });
       return { outcome: { ...outcome, status: "refused", code: "CHANGED", message: failure }, dropWorkspaces: [] };

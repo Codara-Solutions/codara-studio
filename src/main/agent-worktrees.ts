@@ -3531,7 +3531,11 @@ export async function removeAgentWorktree(
     else throw err;
   }
   if (isRefusal(outcome)) {
-    await deps.audit({ ...auditBase, outcome: "refused", code: outcome.code }).catch(() => undefined);
+    // Where the user's held links sit is kept, not only in the reply.
+    const heldLinks = Array.isArray(outcome.heldLinks)
+      ? { heldLinks: outcome.heldLinks as NonNullable<AgentWorktreeAuditEntry["heldLinks"]> }
+      : {};
+    await deps.audit({ ...auditBase, outcome: "refused", code: outcome.code, ...heldLinks }).catch(() => undefined);
     return outcome;
   }
   // A retry that saved a newer ref (only the branch was left) replaces what

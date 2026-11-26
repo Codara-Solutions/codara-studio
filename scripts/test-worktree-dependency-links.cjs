@@ -434,6 +434,56 @@ async function main() {
       packagesIntact();
     });
 
+    await check("round 2: held links stay named however long the message before them", async () => {
+      // Once it is aside, a file takes the link's place (git refuses it, the
+      // link cannot go back) and a folder takes the worktree's own place, so
+      // it stays aside: the error names both long paths before the link.
+      const dir = add(`long-${"y".repeat(225)}`, "feat/long-held");
+      fs.symlinkSync(packages, path.join(dir, "node_modules"), "dir");
+      const entry = await checkOf(dir);
+      assert.deepEqual(codes(entry), [], JSON.stringify(entry.blockers));
+      const real = deps.processesUnderCwds;
+      let aside = null;
+      deps.processesUnderCwds = async (dirs) => {
+        for (const where of dirs) {
+          if (!path.basename(where).endsWith(".codara-removing")) continue;
+          aside = where;
+          fs.writeFileSync(path.join(where, "node_modules"), "made since\n");
+          fs.mkdirSync(dir);
+        }
+        return real(dirs);
+      };
+      let result;
+      try {
+        result = await removeIt(dir, entry.fingerprint);
+      } finally {
+        deps.processesUnderCwds = real;
+      }
+      assert.notEqual(result.status, "removed", JSON.stringify(result));
+      const held = readAudit(auditFile).filter((line) => line.path === dir && line.outcome === "refused").pop()?.heldLinks ?? [];
+      assert.equal(held.length, 1, JSON.stringify(result));
+      const named = result.message.indexOf(`node_modules at ${held[0].held}.`);
+      assert.ok(named > 400, `the message before the held link is long enough to be cut: ${result.message}`);
+      assert.equal(fs.readlinkSync(held[0].held), packages);
+      packagesIntact();
+      const notes = path.join(git(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]), "codara-aside");
+      for (const name of fs.readdirSync(notes)) {
+        if (JSON.parse(fs.readFileSync(path.join(notes, name), "utf8")).aside === aside) fs.rmSync(path.join(notes, name));
+      }
+      for (const where of [dir, aside, path.dirname(held[0].held)]) fs.rmSync(where, { recursive: true, force: true });
+      git(repo, ["worktree", "prune"]);
+    });
+
+    await check("round 2: a removal without its move aside leaves a node_modules link to git, as before", async () => {
+      const dir = add("no-aside", "feat/no-aside");
+      fs.symlinkSync(packages, path.join(dir, "node_modules"), "dir");
+      const result = await gitWorktrees.removeCopyWorktree({ repoCwd: repo, worktreePath: dir, branch: "feat/no-aside", force: false, removeOrphanDir: false });
+      assert.equal(result.ok, false, "git still refuses the untracked link");
+      assert.equal(fs.readlinkSync(path.join(dir, "node_modules")), packages, "the link never moved");
+      assert.deepEqual(fs.readdirSync(trees).filter((name) => name.startsWith("no-aside.links-")), [], "nothing was held");
+      packagesIntact();
+    });
+
     await check("links held when Studio stopped mid-removal come back with the folder", async () => {
       const dir = add("crashed", "feat/crashed");
       fs.symlinkSync("../somewhere/node_modules", path.join(dir, "node_modules"));
@@ -478,6 +528,21 @@ async function main() {
       assert.equal(fs.readFileSync(elsewhere, "utf8"), "theirs\n");
       assert.equal(fs.existsSync(aside), true);
       fs.rmSync(path.join(notes, name));
+    });
+
+    await check("round 2: a noted link no longer where it was held is not named as stuck", async () => {
+      const notes = path.join(git(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"]), "codara-aside");
+      const original = path.join(trees, "already-back");
+      const aside = path.join(trees, ".already-back.codara-removing");
+      fs.mkdirSync(original, { recursive: true });
+      const name = `${require("node:crypto").createHash("sha256").update(aside).digest("hex").slice(0, 24)}.json`;
+      fs.mkdirSync(notes, { recursive: true });
+      const held = `${original}.links-gone/0`;
+      fs.writeFileSync(path.join(notes, name), JSON.stringify({ original, aside, links: [{ path: "node_modules", held }] }));
+      const back = await gitWorktrees.restoreAsideWorktrees(repo);
+      assert.deepEqual(back, { restored: [], stuck: [] });
+      assert.equal(fs.existsSync(path.join(notes, name)), false, "the note is cleared");
+      fs.rmSync(original, { recursive: true });
     });
 
     // ── The agent path ─────────────────────────────────────────────────────
@@ -534,6 +599,34 @@ async function main() {
       packagesIntact();
       const last = readAudit(auditFile).filter((line) => line.workspaceId === made.workspaceId && line.outcome === "removed").pop();
       assert.deepEqual(last?.links, [{ path: "node_modules", text: packages }], JSON.stringify(last));
+
+      // A failed agent removal: the links it left held are in its audit line.
+      made = null;
+      const failing = await agent.createAgentWorktree(maker, { branch: "agent/held" }, agentDeps);
+      assert.equal(failing.ok, true, JSON.stringify(failing));
+      scans = 0;
+      made = failing;
+      const realHeld = agentDeps.workspaceHeld;
+      // Asked once the folder is aside: a file takes the link's place, so it
+      // cannot go back, and a tab "opened" puts the folder back.
+      agentDeps.workspaceHeld = async (_id, dirs) => {
+        const aside = dirs.find((where) => path.basename(where).endsWith(".codara-removing"));
+        if (!aside) return realHeld(_id, dirs);
+        fs.writeFileSync(path.join(aside, "node_modules"), "made since\n");
+        return true;
+      };
+      let refused;
+      try {
+        refused = await agent.removeAgentWorktree(maker, { workspaceId: failing.workspaceId }, agentDeps);
+      } finally {
+        agentDeps.workspaceHeld = realHeld;
+      }
+      assert.equal(refused.ok, false, JSON.stringify(refused));
+      assert.equal(refused.heldLinks?.length, 1, JSON.stringify(refused));
+      const line = readAudit(auditFile).filter((entry) => entry.workspaceId === failing.workspaceId && entry.outcome === "refused").pop();
+      assert.deepEqual(line?.heldLinks, refused.heldLinks, JSON.stringify(line));
+      assert.equal(fs.readlinkSync(line.heldLinks[0].held), packages, "held where the audit says");
+      packagesIntact();
     });
   } finally {
     for (const file of outputs) fs.rmSync(file, { force: true });
