@@ -43,7 +43,7 @@ import {
   resolveMergeDefaultBranch,
 } from "../git-worktrees";
 import { proveByMergedPullRequestStack } from "../merged-pull-request-stack";
-import { isKeptBranch } from "./kept-branches";
+import { isKeptBranch, PROTECTED_BRANCHES } from "./kept-branches";
 import type { LeftoverSystem } from "./leftovers";
 import { setupProvidedEntries } from "../worktree-setup/links";
 import { folderIdentity } from "../worktree-folders";
@@ -240,19 +240,43 @@ function remoteHead(repo: RepoContext, branch: string): Promise<string | null> {
   repo.remoteHeads ??= new Map();
   let pending = repo.remoteHeads.get(branch);
   if (!pending) {
-    pending = runGit(repo.root, ["ls-remote", "--heads", "--end-of-options", "origin", `refs/heads/${branch}`], {
-      timeout: LS_REMOTE_TIMEOUT_MS,
-    }).then(
-      ({ stdout }) => {
-        const line = stdout.split(/\r?\n/).find((entry) => entry.endsWith(`\trefs/heads/${branch}`));
-        const oid = line?.split("\t")[0]?.trim().toLowerCase() ?? "";
-        return /^[0-9a-f]{40,64}$/.test(oid) ? oid : null;
-      },
-      () => null,
-    );
+    pending = liveRemoteHead(repo.root, branch);
     repo.remoteHeads.set(branch, pending);
   }
   return pending;
+}
+
+function liveRemoteHead(root: string, branch: string): Promise<string | null> {
+  return runGit(root, ["ls-remote", "--heads", "--end-of-options", "origin", `refs/heads/${branch}`], {
+    timeout: LS_REMOTE_TIMEOUT_MS,
+  }).then(
+    ({ stdout }) => {
+      const line = stdout.split(/\r?\n/).find((entry) => entry.endsWith(`\trefs/heads/${branch}`));
+      const oid = line?.split("\t")[0]?.trim().toLowerCase() ?? "";
+      return /^[0-9a-f]{40,64}$/.test(oid) ? oid : null;
+    },
+    () => null,
+  );
+}
+
+/**
+ * For a merge proved in a long-lived branch other than the default
+ * (staging), which some repositories reset: whether origin still holds the
+ * commit the proof was made against. Asked again right before deletion; no
+ * answer is a no. Any other proof is unchanged by this.
+ */
+export async function longLivedTargetStillHolds(
+  root: string,
+  merge: Pick<MergeFacts, "state" | "target" | "targetCommit">,
+  defaultBranch: string | null,
+): Promise<boolean> {
+  if (merge.state !== "merged" || !merge.target) return true;
+  // origin/staging or the local staging it was judged by: origin's either way.
+  const name = merge.target.startsWith("origin/") ? merge.target.slice("origin/".length) : merge.target;
+  if (!PROTECTED_BRANCHES.has(name) || name === (defaultBranch ? shortBranch(defaultBranch) : null)) return true;
+  const live = await liveRemoteHead(root, name);
+  if (!live || !merge.targetCommit || !(await revParse(root, `${live}^{commit}`))) return false;
+  return isAncestor(root, merge.targetCommit, live);
 }
 
 interface WorktreeListing {
@@ -718,11 +742,31 @@ export async function mergeFacts(
   if (branch && (branch === shortBranch(target.name) || branch === target.name)) return { state: "base", ...base };
   const { ahead, behind } = await aheadBehind(repo.root, target.commit, head);
   const facts = { ...base, ahead, behind };
-  if (ahead === 0 && (await isAncestor(repo.root, head, target.commit))) return { state: "merged", proof: "ancestor", ...facts };
+  const fallback = repo.base;
+  const defaultShort = fallback ? shortBranch(fallback.name) : null;
+  // Only as origin has it now: a stale tracking ref may still hold a merge
+  // the branch lost (deleted unmerged, force-pushed). Its commit must be
+  // here too, or the merge cannot be found in it.
+  const liveCommit = async (name: string): Promise<string | null> => {
+    const now = await remoteHead(repo, name);
+    return now && (await revParse(repo.root, `${now}^{commit}`)) ? now : null;
+  };
+  // A long-lived branch other than the default (staging, release), which
+  // some repositories reset: judged only as origin has it now.
+  const targetShort = target.name.startsWith("origin/") ? target.name.slice("origin/".length) : target.name;
+  const longLivedTarget = PROTECTED_BRANCHES.has(targetShort) && targetShort !== defaultShort;
+  // What the target holds for the proofs below that read its content.
+  const judged = longLivedTarget ? await liveCommit(targetShort) : target.commit;
+  // A proof read from it names the commit it was made against, which the
+  // removal asks origin about again.
+  const judgedFacts = async () =>
+    judged && judged !== target.commit ? { target: target.name, targetCommit: judged, ...(await aheadBehind(repo.root, judged, head)) } : facts;
+  if (judged && (longLivedTarget || ahead === 0) && (await isAncestor(repo.root, head, judged))) {
+    return { state: "merged", proof: "ancestor", ...(await judgedFacts()) };
+  }
   // A base that is not the default branch (a stacked pull request's branch,
   // often deleted once merged) can lag behind where the work went. The
   // default branch, as the remote has it, counts as well.
-  const fallback = repo.base;
   const onDefault = Boolean(fallback && branch && (branch === shortBranch(fallback.name) || branch === fallback.name));
   if (fallback && !onDefault && fallback.commit !== target.commit && (await isAncestor(repo.root, head, fallback.commit))) {
     const counts = await aheadBehind(repo.root, fallback.commit, head);
@@ -745,23 +789,22 @@ export async function mergeFacts(
     // their merges. A base on another remote (upstream/feat/x, a fork) gives
     // no such proof: its feat/x is not the branch the pull request merged into.
     const ownBase = !targetIsRemote ? target.name : target.name.startsWith("origin/") ? target.name.slice("origin/".length) : null;
-    // Only as origin has it now: a stale tracking ref may still hold a merge
-    // the branch lost (deleted unmerged, force-pushed). Its commit must be
-    // here too, or the merge cannot be found in it.
-    const ownCommit = async (): Promise<string | null> => {
-      if (!ownBase) return null;
-      const now = await remoteHead(repo, ownBase);
-      return now && (await revParse(repo.root, `${now}^{commit}`)) ? now : null;
-    };
+    // A long-lived branch other than the default (staging, release) is where
+    // some repositories merge first. Its copy on origin now counts as well,
+    // the worktree's own base included, but only for a pull request whose
+    // head is exactly this tip: a folder with commits past what was merged,
+    // or one behind it, stays unmerged.
+    const longLived = new Set([...PROTECTED_BRANCHES].filter((name) => name !== defaultShort));
     for (const name of branches) {
       const stacked = await proveByMergedPullRequestStack({
         repo: repo.root,
         tip: head,
         branch: name,
         mergedFor: async (headName) => all.filter((pr) => pr.headRefName === headName),
-        landedBases: new Set(fallback ? [shortBranch(fallback.name)] : []),
+        landedBases: new Set(defaultShort ? [defaultShort] : []),
         defaultCommit: fallback?.commit ?? null,
-        remoteCommit: async (base) => (ownBase !== null && base === ownBase ? ownCommit() : null),
+        remoteCommit: async (base) => (base === ownBase || longLived.has(base) ? liveCommit(base) : null),
+        exactTipBases: longLived,
       });
       if (!stacked) continue;
       // Judged against where it landed, never a local-only base (the rail's
@@ -784,8 +827,8 @@ export async function mergeFacts(
       };
     }
   }
-  if ((await contentInTarget(repo.root, head, target.commit)) === true) {
-    return { state: "merged", proof: "content-in-target", ...facts };
+  if (judged && (await contentInTarget(repo.root, head, judged)) === true) {
+    return { state: "merged", proof: "content-in-target", ...(await judgedFacts()) };
   }
   return { state: "unmerged", ...facts };
 }
@@ -978,6 +1021,7 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
     state: merge.state,
     ...(merge.proof ? { proof: merge.proof } : {}),
     ...(merge.target ? { target: merge.target } : {}),
+    ...(merge.state === "merged" && merge.targetCommit ? { targetCommit: merge.targetCommit } : {}),
     ...(merge.via ? { via: merge.via } : {}),
   };
   if (merge.state === "unmerged" || merge.state === "unknown") {
