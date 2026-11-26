@@ -39,7 +39,7 @@ const harnessPlugin = {
       path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
     }));
     build.onResolve(
-      { filter: /^(electron|\.\/pty-manager|\.\/notify|\.\/owned-process-tree|\.\/agent-session-registry|\.\/orchestration\/usage-activity-refresh)$/ },
+      { filter: /^(electron|\.\/pty-manager|\.\/notify|\.\/owned-process-tree|\.\/agent-session-registry|\.\/agent-turn-ledger|\.\/orchestration\/usage-activity-refresh)$/ },
       (args) => ({ path: args.path, namespace: "stub" }),
     );
     build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => {
@@ -49,6 +49,18 @@ const harnessPlugin = {
         return {
           contents: init + "export function latestSessionStart(id){ return globalThis.__TAN.sessions?.get(id) ?? null; }\n",
           loader: "js",
+        };
+      }
+      if (args.path === "./agent-turn-ledger") {
+        // The real ledger, with each note it is given recorded.
+        return {
+          contents:
+            init +
+            `import * as real from ${JSON.stringify(path.join(ROOT, "src/main/agent-turn-ledger.ts"))};\n` +
+            "export const lastAgentTurnAt = real.lastAgentTurnAt;\n" +
+            "export function noteAgentTurn(workspaceId, cwds, at, edge){ (globalThis.__TAN.turnNotes ??= []).push({ workspaceId, cwds: [...cwds], at, edge }); return real.noteAgentTurn(workspaceId, cwds, at, edge); }\n",
+          loader: "js",
+          resolveDir: ROOT,
         };
       }
       if (args.path === "./orchestration/usage-activity-refresh") {
@@ -1516,6 +1528,27 @@ async function main() {
   mod.syncTerminalNotifyPanes({ workspaceId: "ws-closing", panes: [] });
   await sleep(60_000);
   check("idle clock: a pane closed mid-turn ends the turn at the close", mod.terminalAgentLastTurnAt(inClosing) === closedAt);
+  // A long tool call changes no state: the turn is still stamped as it
+  // goes, so a crash in the middle loses seconds, not the whole turn.
+  T.cwds.set("long", "/work/long");
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-long", panes: [
+    { paneId: "long", tabId: "tl", tabTitle: "claude", excluded: false, runtimeHint: "claude" },
+  ] });
+  mod.noteTerminalUserInput("long", "run the whole suite\r");
+  feed("long", "\x1b]9;4;1;10\x07");
+  await sleep(1500);
+  const longStart = Date.now();
+  // Claude keeps its progress bar up through the call: the same state.
+  for (let i = 0; i < 9; i += 1) {
+    await sleep(5_000);
+    feed("long", "\x1b]9;4;1;10\x07");
+  }
+  const longNotes = (T.turnNotes ?? []).filter((note) => note.workspaceId === "ws-long" && note.at > longStart);
+  check(
+    "idle clock: a long quiet turn is stamped about every 10 s",
+    longNotes.length >= 4 && Math.max(...longNotes.map((note) => note.at)) >= Date.now() - 11_000,
+  );
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-long", panes: [] });
 
   // Each folder keeps its own time.
   T.cwds.set("mover", "/work/a");
@@ -1546,6 +1579,15 @@ async function main() {
   await shortTurn("third", () => mod.noteTerminalHookEvent("mover", "PreToolUse", { tool_name: "Bash", cwd: "/work/moved" }));
   movedEnd = folder("/work/b");
   check("idle clock: a folder the agent moved to mid-turn is credited with the turn's end", folder("/work/moved") === movedEnd && movedEnd > firstEnd);
+  // Through two folders within seconds: the one it passed through counts too.
+  await sleep(60_000);
+  await shortTurn("hop", () => {
+    mod.noteTerminalHookEvent("mover", "PreToolUse", { tool_name: "Bash", cwd: "/work/hop-1" });
+    mod.noteTerminalHookEvent("mover", "PreToolUse", { tool_name: "Bash", cwd: "/work/hop-2" });
+    mod.noteTerminalHookEvent("mover", "PreToolUse", { tool_name: "Bash", cwd: "/work/hop-3" });
+  });
+  check("idle clock: a folder passed through between two stamps is credited", folder("/work/hop-2") === folder("/work/b") && folder("/work/hop-2") > movedEnd);
+  movedEnd = folder("/work/b");
   // An old session's record names another folder: not this session's.
   T.sessions = new Map([["mover", { paneId: "mover", runtime: "claude", sessionId: "old-session", cwd: "/work/old" }]]);
   await sleep(60_000);

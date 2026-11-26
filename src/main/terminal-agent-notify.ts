@@ -694,6 +694,8 @@ function ensureSweep(): void {
         continue;
       }
       if (!w.runtime) continue;
+      // A long tool call changes no state: still work, stamped as it goes.
+      if (w.clockBusy) stampWork(w, now, false);
       sweepBackground(w, now);
       if (w.runtime === "codex") pollCodexRollout(w);
       if (w.runtime === "codex" && w.codexScreen) {
@@ -1351,7 +1353,11 @@ export function noteTerminalHookEvent(
   if (agentId) w.background.noteTaskSign(agentId, now);
   // Where the agent is now: its Bash tool may have moved since the start.
   const hookCwd = stringField(payload, "cwd");
-  if (hookCwd && path.isAbsolute(hookCwd)) w.hookCwd = hookCwd;
+  if (hookCwd && path.isAbsolute(hookCwd)) {
+    w.hookCwd = hookCwd;
+    // Every folder it passes through, also between two stamps.
+    if (w.clockBusy) w.clockCwds.add(hookCwd);
+  }
   if (w.clockBusy) stampWork(w, now, false);
   switch (hookName) {
     case "UserPromptSubmit": {

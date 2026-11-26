@@ -55,15 +55,18 @@ function trim(now: number): void {
 
 function save(now: number): void {
   if (!file) return;
+  const temp = `${file}.${process.pid}.tmp`;
+  // A failed save is tried again at the next edge or a minute on, not at
+  // every stamp.
+  savedAt = now;
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    const temp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(temp, JSON.stringify({ version: 1, floor, entries: [...entries.values()] }), { mode: 0o600 });
     fs.renameSync(temp, file);
-    savedAt = now;
     unsaved = false;
   } catch (err) {
     console.warn("[agent-turn-ledger] could not save the agent turn times:", err);
+    fs.rmSync(temp, { force: true });
   }
 }
 

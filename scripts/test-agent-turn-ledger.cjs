@@ -112,6 +112,59 @@ test("an entry ages out only past the longest idle span anyone asks about", ({ m
   assert.equal(mod.lastAgentTurnAt(inFolder("/work/future")), now, "a time ahead of the clock is now");
 });
 
+test("a save that fails is tried again at the next edge, not at every stamp, and leaves no temp file", ({ mod, temp }) => {
+  // The target is a folder with something in it: the rename always fails.
+  const file = path.join(temp, "broken", "agent-turns.json");
+  fs.mkdirSync(path.join(file, "inside"), { recursive: true });
+  mod.persistAgentTurns(file, 1_000_000);
+  const warn = console.warn;
+  let warnings = 0;
+  console.warn = () => {
+    warnings += 1;
+  };
+  try {
+    mod.noteAgentTurn("ws-1", ["/work/a"], 1_000_000, true);
+    assert.equal(warnings, 1, "the edge tried to save");
+    for (let at = 1_010_000; at < 1_060_000; at += 10_000) mod.noteAgentTurn("ws-1", ["/work/a"], at, false);
+    assert.equal(warnings, 1, "stamps inside the turn do not retry each time");
+    mod.noteAgentTurn("ws-1", ["/work/a"], 1_065_000, true);
+    assert.equal(warnings, 2, "the next edge does");
+  } finally {
+    console.warn = warn;
+  }
+  assert.deepEqual(fs.readdirSync(path.dirname(file)), ["agent-turns.json"], "no temp file left");
+  assert.equal(mod.lastAgentTurnAt(inFolder("/work/a")), 1_065_000, "the time is still known in memory");
+});
+
+// The cleanup deps' matcher: a folder is the same however its path is spelled.
+async function matcherTests(temp) {
+  const outfile = path.join(ROOT, "node_modules", ".cache", `agent-turns-match-${process.pid}.cjs`);
+  fs.mkdirSync(path.dirname(outfile), { recursive: true });
+  await esbuild.build({
+    entryPoints: [path.join(ROOT, "src", "main", "worktree-cleanup", "agent-turns.ts")],
+    outfile,
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    alias: { "@shared": path.join(ROOT, "src", "shared") },
+    external: ["electron", "ssh2", "cpu-features"],
+    logLevel: "silent",
+  });
+  try {
+    const { agentTurnIn } = require(outfile);
+    const at = agentTurnIn(["ws-a"], ["/wt/a/", "C:/x/wt"]);
+    assert.equal(at("ws-z", "/wt/a"), true, "a folder given with a trailing slash");
+    assert.equal(at("ws-z", "/wt/a/src/deep"), true, "a folder inside it");
+    assert.equal(at("ws-z", "/wt/ab"), false, "a sibling whose name starts the same");
+    assert.equal(at("ws-z", "C:\\x\\wt\\src"), true, "backslashes for slashes");
+    assert.equal(at("ws-a", "/elsewhere"), false, "a known folder elsewhere, even in the workspace");
+    assert.equal(at("ws-a", null), true, "no folder known: by the workspace");
+    assert.equal(at("ws-z", null), false);
+  } finally {
+    fs.rmSync(outfile, { force: true });
+  }
+}
+
 (async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "codara-agent-turns-"));
   const outfile = path.join(temp, "agent-turn-ledger.cjs");
@@ -139,8 +192,17 @@ test("an entry ages out only past the longest idle span anyone asks about", ({ m
     }
   }
   console.warn = warn;
+  try {
+    await matcherTests(temp);
+    console.log("PASS the cleanup deps match a folder however its path is spelled");
+  } catch (err) {
+    failed += 1;
+    console.error("FAIL the cleanup deps match a folder however its path is spelled");
+    console.error(err && err.stack ? err.stack : err);
+  }
   fs.rmSync(temp, { recursive: true, force: true });
-  console.log(`\n${TESTS.length - failed}/${TESTS.length} agent-turn-ledger tests passed`);
+  const total = TESTS.length + 1;
+  console.log(`\n${total - failed}/${total} agent-turn-ledger tests passed`);
   process.exit(failed ? 1 : 0);
 })().catch((err) => {
   console.error(err);

@@ -1409,12 +1409,12 @@ app.whenReady().then(async () => {
       ),
     )
     .catch(() => undefined);
+  // The worktree idle clock remembers agent turns across restarts.
+  persistAgentTurns(join(codaraHome(), "agent-turns.json"));
   // One-time tidy-up after the retired "Active account in your terminal"
   // feature: delete the pointer symlinks and generated env.sh it kept under
   // <codara-home>/cli/active/. Once they are gone this is a no-op, and
   // anything unrecognized in that directory is left alone and logged.
-  // The worktree idle clock remembers agent turns across restarts.
-  persistAgentTurns(join(codaraHome(), "agent-turns.json"));
   void cleanupNativeCliActivePointerArtifacts(codaraHome())
     .then((result) => {
       for (const refusal of result.refused) {
