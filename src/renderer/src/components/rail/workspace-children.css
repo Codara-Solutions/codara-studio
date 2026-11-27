@@ -246,7 +246,9 @@
   opacity: 0.52;
 }
 
-/* Same look as the explorer's move confirm (FileTree.tsx). */
+/* The explorer's move confirm layout (FileTree.tsx). The card itself is the
+   solid reading surface (.fb-solid), never glass: it lists what Clean up
+   removes, over live terminals. */
 .rail-confirm-scrim {
   position: fixed;
   inset: 0;

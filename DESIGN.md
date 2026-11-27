@@ -1284,3 +1284,19 @@ closed an agent mid-turn without a word.
   or `codara_terminal_close`, worktree removal, a shell that exits. Quit keeps
   its own native prompt for live work.
 - No "don't ask again" and no setting.
+
+## Worktree clean-up dialogs (2026-11)
+
+**Chosen:** the agent's "Remove worktrees?", Clean up worktrees and the rail's
+Clean up confirm sit on the solid reading surface (`.fb-solid`: `--panel`,
+`--rule`, a deep shadow), never glass. The owner found the approval dialog
+unreadable over a busy terminal ("why is it so transparent!"): even the read
+tier of glass let the text behind show through. No new tokens; layout, text
+and buttons are unchanged.
+
+**Rules:**
+
+- A dialog that asks what to delete is read word by word over live
+  terminals, so nothing behind it shows through, with glass on or off.
+- A dialog focused by script keeps its shadow, not the focus ring; its
+  controls show their own (`test-dialog-glass-surface.cjs`).

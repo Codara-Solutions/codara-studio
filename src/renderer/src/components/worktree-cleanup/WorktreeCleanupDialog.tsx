@@ -468,7 +468,7 @@ export default function WorktreeCleanupDialog({
         aria-modal="true"
         aria-labelledby="wtc-title"
         tabIndex={-1}
-        className="spark-glass--strong spark-overlay-surface wtc-dialog"
+        className="fb-solid wtc-dialog"
         onKeyDown={trapTab}
       >
         <header className="wtc-header">

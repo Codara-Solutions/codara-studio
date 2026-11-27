@@ -4964,6 +4964,22 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   border-color: color-mix(in oklab, var(--ink) 12%, transparent);
   box-shadow: 0 24px 64px oklch(0 0 0 / 0.16), 0 2px 8px oklch(0 0 0 / 0.08);
 }
+/* The same solid reading surface for dialogs outside Settings: Send
+   feedback and its agent cards, and the worktree clean-up dialogs. They hold
+   text to read and choices to make over live terminals, so nothing behind
+   them ever shows through, with glass on or off. A dialog focused by script
+   keeps its shadow rather than the focus ring: its controls show their own. */
+.fb-solid,
+.fb-solid[tabindex]:focus-visible {
+  border: 1px solid var(--rule);
+  background: var(--panel);
+  box-shadow: 0 24px 64px oklch(0 0 0 / 0.35), 0 2px 8px oklch(0 0 0 / 0.18);
+}
+:root[data-theme-mode="light"] .fb-solid,
+:root[data-theme-mode="light"] .fb-solid[tabindex]:focus-visible {
+  border-color: color-mix(in oklab, var(--ink) 12%, transparent);
+  box-shadow: 0 24px 64px oklch(0 0 0 / 0.16), 0 2px 8px oklch(0 0 0 / 0.08);
+}
 .spark-quick-open__results {
   background: var(--bg);
 }

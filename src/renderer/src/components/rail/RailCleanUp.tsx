@@ -350,7 +350,7 @@ export function RailConfirm({
         tabIndex={-1}
         aria-label={title}
         data-testid={testId}
-        className="rail-confirm spark-glass--strong spark-overlay-surface"
+        className="rail-confirm fb-solid"
         onClick={(event) => event.stopPropagation()}
       >
         <span className="rail-confirm-title">{title}</span>
