@@ -1398,7 +1398,7 @@ async function main() {
     alias: { "@shared": SHARED_DIR },
     logLevel: "silent",
   });
-  const { AgentSessions } = require(sessionsOut);
+  const { AgentSessions, agentSessionMessageRefusal } = require(sessionsOut);
   const sessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), "spark-tan-sessions-"));
   const store = new AgentSessions({ dir: sessionsDir, live: (paneId) => mod.terminalAgentSessionLive(paneId), bootAt: Date.now() - 1 });
   await store.load();
@@ -1446,6 +1446,92 @@ async function main() {
     "codex session: the follow-up's notify finishes it with the new message",
     sessionView().status === "finished" && sessionView().finalMessage === "Added the test.",
   );
+
+  // A Codex pane at its prompt after Enters that started no Codex turn (the
+  // replayed notifier log of a relay refused as "working": Codex with program
+  // status, three Enters, no work, minutes at the prompt). The relay reads the
+  // pane as session-relay/index.ts busy() does, session.message through the
+  // session store, the session list through the activity snapshot.
+  const relayRefusal = (paneId) => {
+    const live = mod.terminalAgentSessionLive(paneId);
+    const evidence = mod.terminalAgentHibernationEvidence(paneId);
+    const working = live.turnActive || ["launching", "working", "background", "stalled"].includes(live.state);
+    return agentSessionMessageRefusal({
+      status: live.state === "blocked" ? "needs_you" : working ? "working" : "finished",
+      runtime: evidence?.runtime ?? live.runtime,
+      running: true,
+      lastUserInputAt: evidence?.lastUserInputAt ?? 0,
+      lastSubmitAt: evidence?.lastSubmitAt ?? 0,
+      now: Date.now(),
+    });
+  };
+  const listedState = (paneId) => mod.terminalAgentActivitySnapshot().find((entry) => entry.paneId === paneId)?.state;
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-session", panes: [
+    { paneId: "c-session", tabId: "tc-session", tabTitle: "Codex", excluded: false },
+    { paneId: "c-prompt", tabId: "tc-prompt", tabTitle: "Codex", excluded: false },
+  ] });
+  feed("c-prompt", "\x1b]633;E;codex\x07│ >_ OpenAI Codex (v0.163.0)                          │\r\n");
+  feed("c-prompt", "\x1b]7501;state=idle:app=codex\x1b\\");
+  feed("c-prompt", "\x1b]7501;state=working:app=codex\x1b\\");
+  await sleep(2_000);
+  feed("c-prompt", "\x1b]7501;state=idle:app=codex\x1b\\");
+  await sleep(5_000);
+  const promptRecord = {
+    ...sessionRecord, id: "as-codex-2", paneId: "c-prompt", tabId: "tc-prompt",
+    startedAt: Date.now() - 60_000, promptAt: Date.now() - 60_000, turnEndedAt: Date.now() - 30_000,
+  };
+  await store.add(promptRecord);
+  const beforeEnters = alertCount();
+  for (const _ of [1, 2, 3]) {
+    mod.noteTerminalUserInput("c-prompt", "\r");
+    feed("c-prompt", "\x1b]7501;state=idle:app=codex\x1b\\");
+    await sleep(1_300);
+  }
+  check("codex prompt: the session list reads it idle after the Enters", listedState("c-prompt") === "idle");
+  check("codex prompt: a relay right after an Enter still waits for Codex to start", /it is working/.test(relayRefusal("c-prompt") ?? ""));
+  await sleep(10_000);
+  check("codex prompt: Enters that started no Codex turn leave no turn open", mod.terminalAgentSessionLive("c-prompt").turnActive === false);
+  check("codex prompt: a relayed message is no longer refused as working", relayRefusal("c-prompt") === null);
+  check("codex prompt: session.message reads it at rest", store.state(store.get("as-codex-2")).status === "finished");
+  check("codex prompt: the session list still reads it idle", listedState("c-prompt") === "idle");
+  check("codex prompt: closing the unstarted turn alerts nobody", alertCount() === beforeEnters);
+  // A submit Codex does take is a turn until Codex ends it, however long.
+  mod.noteTerminalUserInput("c-prompt", "refactor the parser\r");
+  feed("c-prompt", "\x1b]7501;state=working:app=codex\x1b\\");
+  await sleep(11_000);
+  check("codex prompt: a relay is refused while Codex works on a turn", /it is working/.test(relayRefusal("c-prompt") ?? ""));
+  check("codex prompt: session.message is refused too", store.state(store.get("as-codex-2")).status === "working");
+  mod.noteTerminalHookEvent("c-prompt", "CodexNotify", {
+    type: "agent-turn-complete",
+    "turn-id": "p-1",
+    "input-messages": ["refactor the parser"],
+    "last-assistant-message": "Refactored the parser.",
+  });
+  feed("c-prompt", "\x1b]7501;state=idle:app=codex\x1b\\");
+  await sleep(50);
+  check("codex prompt: that turn's end is announced", alertCount() === beforeEnters + 1 && /Refactored the parser/.test(T.alerts.at(-1).body));
+  check("codex prompt: and the pane takes relayed messages again", relayRefusal("c-prompt") === null);
+  // Codex worked and is back at its prompt, but its own end has not come:
+  // the turn is still Codex's, however long notify takes.
+  mod.noteTerminalUserInput("c-prompt", "and add a test\r");
+  feed("c-prompt", "\x1b]7501;state=working:app=codex\x1b\\");
+  await sleep(2_000);
+  feed("c-prompt", "\x1b]7501;state=idle:app=codex\x1b\\");
+  await sleep(12_000);
+  check("codex prompt: a turn that worked stays open at the prompt until Codex ends it", /it is working/.test(relayRefusal("c-prompt") ?? ""));
+  mod.noteTerminalHookEvent("c-prompt", "CodexNotify", {
+    type: "agent-turn-complete", "turn-id": "p-2", "input-messages": ["and add a test"], "last-assistant-message": "Added a test.",
+  });
+  check("codex prompt: and its end is announced once", alertCount() === beforeEnters + 2 && /Added a test/.test(T.alerts.at(-1).body));
+  // A submit whose work nothing here saw start: once closed, Codex's own
+  // completion naming the input still announces it.
+  mod.noteTerminalUserInput("c-prompt", "check the docs\r");
+  await sleep(11_000);
+  check("codex prompt: an unseen start is closed after the wait", mod.terminalAgentSessionLive("c-prompt").turnActive === false);
+  mod.noteTerminalHookEvent("c-prompt", "CodexNotify", {
+    type: "agent-turn-complete", "turn-id": "p-3", "input-messages": ["check the docs"], "last-assistant-message": "The docs are current.",
+  });
+  check("codex prompt: a completion right after the close is still announced", alertCount() === beforeEnters + 3 && /The docs are current/.test(T.alerts.at(-1).body));
   stopStore();
   await store.flush();
   fs.rmSync(sessionsDir, { recursive: true, force: true });
