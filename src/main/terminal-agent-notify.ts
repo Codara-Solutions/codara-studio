@@ -129,6 +129,10 @@ const BACKGROUND_PROBE_MS = 10_000;
 // tracked session file), an idle screen waits this long for it so the alert
 // carries Codex's own message and an interrupted turn stays silent.
 const CODEX_STRUCTURED_GRACE_MS = 3_000;
+// Codex paints its working footer (and reports working) the moment it takes
+// a submit; one that sat at its prompt this long after an Enter started no
+// turn, so nothing will ever end the turn that Enter opened here.
+const CODEX_UNSTARTED_TURN_MS = 10_000;
 // Esc / Ctrl+C followed by an idle screen within this window is the user
 // stopping the turn. Claude sends no hook for it.
 const INTERRUPT_WINDOW_MS = 10_000;
@@ -697,7 +701,10 @@ function ensureSweep(): void {
       // A long tool call changes no state: still work, stamped as it goes.
       if (w.clockBusy) stampWork(w, now, false);
       sweepBackground(w, now);
-      if (w.runtime === "codex") pollCodexRollout(w);
+      if (w.runtime === "codex") {
+        pollCodexRollout(w);
+        closeUnstartedCodexTurn(w, now);
+      }
       if (w.runtime === "codex" && w.codexScreen) {
         sweepCodexScreen(w, now);
         continue;
@@ -920,6 +927,21 @@ function codexTurnEndedOnScreen(w: PaneWatcher, now: number): void {
     origin: "heuristic",
     delayMs: codexStructuredExpected(w) ? CODEX_STRUCTURED_GRACE_MS : 0,
   });
+}
+
+// An Enter that Codex took as no turn (an empty composer, a local slash
+// command, a choice in a popup) opened one here that Codex never reports the
+// end of: its notify, session file and program status speak only of turns it
+// ran. Left open, the pane reads as working to a relayed message and to
+// session.message until its next real turn ends, while the chip and the
+// session list show it idle. A late completion that names the user's input
+// still starts and announces its own turn (codexCompleted).
+function closeUnstartedCodexTurn(w: PaneWatcher, now: number): void {
+  const turn = w.turn;
+  if (!turn || turn.announced || turn.source !== "input") return;
+  if (w.state !== "idle" || w.pendingDone !== null || w.lastWorkingAt >= turn.startedAt) return;
+  if (now - turn.startedAt < CODEX_UNSTARTED_TURN_MS) return;
+  closeTurnSilently(w, now, "the submit started no Codex turn");
 }
 
 function codexHasStructuredDone(w: PaneWatcher): boolean {
