@@ -701,14 +701,14 @@ function ensureSweep(): void {
       // A long tool call changes no state: still work, stamped as it goes.
       if (w.clockBusy) stampWork(w, now, false);
       sweepBackground(w, now);
-      if (w.runtime === "codex") {
-        pollCodexRollout(w);
-        closeUnstartedCodexTurn(w, now);
-      }
+      if (w.runtime === "codex") pollCodexRollout(w);
       if (w.runtime === "codex" && w.codexScreen) {
         sweepCodexScreen(w, now);
+        // After the screen read, so work it first sees on this tick counts.
+        closeUnstartedCodexTurn(w, now);
         continue;
       }
+      if (w.runtime === "codex") closeUnstartedCodexTurn(w, now);
       // A screenless Codex with a structured source still needs the quiet
       // window to settle its chip; codexTurnEndedOnScreen sends no done there.
       if (w.signals.programStatus || (w.signals.hooks && w.runtime !== "codex")) {
@@ -942,6 +942,9 @@ function closeUnstartedCodexTurn(w: PaneWatcher, now: number): void {
   if (w.state !== "idle" || w.pendingDone !== null || w.lastWorkingAt >= turn.startedAt) return;
   if (now - turn.startedAt < CODEX_UNSTARTED_TURN_MS) return;
   closeTurnSilently(w, now, "the submit started no Codex turn");
+  // Not an announcement: codexCompleted must not take a completion right
+  // after this for a repeat of one already announced.
+  turn.announcedAt = 0;
 }
 
 function codexHasStructuredDone(w: PaneWatcher): boolean {
@@ -1668,6 +1671,9 @@ function handleCodexRolloutEvent(w: PaneWatcher, event: CodexRolloutEvent): void
   if (event.type === "task_started") {
     w.codexAwaitingIdle = false;
     if (!w.signals.programStatus && !w.codexTitleBlocked) enterWorking(w, now);
+    // Program status or an approval owns the chip, but the turn is still
+    // work seen since the submit: closeUnstartedCodexTurn must leave it open.
+    else w.lastWorkingAt = now;
     return;
   }
   if (event.type === "turn_aborted") {

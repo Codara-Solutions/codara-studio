@@ -1488,7 +1488,7 @@ async function main() {
     await sleep(1_300);
   }
   check("codex prompt: the session list reads it idle after the Enters", listedState("c-prompt") === "idle");
-  check("codex prompt: a relay right after an Enter still waits for Codex to start", relayRefusal("c-prompt") !== null);
+  check("codex prompt: a relay right after an Enter still waits for Codex to start", /it is working/.test(relayRefusal("c-prompt") ?? ""));
   await sleep(10_000);
   check("codex prompt: Enters that started no Codex turn leave no turn open", mod.terminalAgentSessionLive("c-prompt").turnActive === false);
   check("codex prompt: a relayed message is no longer refused as working", relayRefusal("c-prompt") === null);
@@ -1498,7 +1498,7 @@ async function main() {
   // A submit Codex does take is a turn until Codex ends it, however long.
   mod.noteTerminalUserInput("c-prompt", "refactor the parser\r");
   feed("c-prompt", "\x1b]7501;state=working:app=codex\x1b\\");
-  await sleep(30_000);
+  await sleep(11_000);
   check("codex prompt: a relay is refused while Codex works on a turn", /it is working/.test(relayRefusal("c-prompt") ?? ""));
   check("codex prompt: session.message is refused too", store.state(store.get("as-codex-2")).status === "working");
   mod.noteTerminalHookEvent("c-prompt", "CodexNotify", {
@@ -1511,6 +1511,27 @@ async function main() {
   await sleep(50);
   check("codex prompt: that turn's end is announced", alertCount() === beforeEnters + 1 && /Refactored the parser/.test(T.alerts.at(-1).body));
   check("codex prompt: and the pane takes relayed messages again", relayRefusal("c-prompt") === null);
+  // Codex worked and is back at its prompt, but its own end has not come:
+  // the turn is still Codex's, however long notify takes.
+  mod.noteTerminalUserInput("c-prompt", "and add a test\r");
+  feed("c-prompt", "\x1b]7501;state=working:app=codex\x1b\\");
+  await sleep(2_000);
+  feed("c-prompt", "\x1b]7501;state=idle:app=codex\x1b\\");
+  await sleep(12_000);
+  check("codex prompt: a turn that worked stays open at the prompt until Codex ends it", /it is working/.test(relayRefusal("c-prompt") ?? ""));
+  mod.noteTerminalHookEvent("c-prompt", "CodexNotify", {
+    type: "agent-turn-complete", "turn-id": "p-2", "input-messages": ["and add a test"], "last-assistant-message": "Added a test.",
+  });
+  check("codex prompt: and its end is announced once", alertCount() === beforeEnters + 2 && /Added a test/.test(T.alerts.at(-1).body));
+  // A submit whose work nothing here saw start: once closed, Codex's own
+  // completion naming the input still announces it.
+  mod.noteTerminalUserInput("c-prompt", "check the docs\r");
+  await sleep(11_000);
+  check("codex prompt: an unseen start is closed after the wait", mod.terminalAgentSessionLive("c-prompt").turnActive === false);
+  mod.noteTerminalHookEvent("c-prompt", "CodexNotify", {
+    type: "agent-turn-complete", "turn-id": "p-3", "input-messages": ["check the docs"], "last-assistant-message": "The docs are current.",
+  });
+  check("codex prompt: a completion right after the close is still announced", alertCount() === beforeEnters + 3 && /The docs are current/.test(T.alerts.at(-1).body));
   stopStore();
   await store.flush();
   fs.rmSync(sessionsDir, { recursive: true, force: true });
